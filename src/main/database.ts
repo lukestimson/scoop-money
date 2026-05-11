@@ -5,9 +5,17 @@ import type {
   Account,
   AccountType,
   BudgetItem,
+  BudgetLineItem,
+  BudgetSupportScope,
   BudgetType,
   CategoryMappingRule,
+  ExpectedIncomeEntry,
+  FilingStatus,
+  ImportedFilePreview,
+  ImportedFileRecord,
   IncomeEntry,
+  IncomeKind,
+  IncomeTaxSettings,
   Transaction,
   TransactionFilters,
   TransactionSource
@@ -15,6 +23,10 @@ import type {
 
 let database: Database.Database | null = null
 let databasePath = ''
+
+function cents(dollars: number): number {
+  return Math.round(dollars * 100)
+}
 
 const CREATE_ACCOUNTS = `
 CREATE TABLE IF NOT EXISTS accounts (
@@ -41,6 +53,27 @@ CREATE TABLE IF NOT EXISTS transactions (
   updated_at INTEGER NOT NULL
 )`
 
+const CREATE_TRANSACTION_DEDUPE_INDEX = `
+CREATE INDEX IF NOT EXISTS transactions_import_dedupe_idx
+ON transactions (date, amount, description)`
+
+const CREATE_IMPORTED_FILES = `
+CREATE TABLE IF NOT EXISTS imported_files (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  file_name TEXT NOT NULL DEFAULT '',
+  file_path TEXT NOT NULL DEFAULT '',
+  file_size INTEGER NOT NULL DEFAULT 0,
+  file_type TEXT NOT NULL DEFAULT '',
+  account_id INTEGER,
+  imported_count INTEGER NOT NULL DEFAULT 0,
+  skipped_count INTEGER NOT NULL DEFAULT 0,
+  error_count INTEGER NOT NULL DEFAULT 0,
+  first_transaction_date INTEGER,
+  last_transaction_date INTEGER,
+  preview_json TEXT NOT NULL DEFAULT '{"headers":[],"rows":[],"rowCount":0,"columnCount":0}',
+  created_at INTEGER NOT NULL
+)`
+
 const CREATE_BUDGET_ITEMS = `
 CREATE TABLE IF NOT EXISTS budget_items (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,6 +84,23 @@ CREATE TABLE IF NOT EXISTS budget_items (
   amount_with_parents INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
+)`
+
+const CREATE_BUDGET_LINE_ITEMS = `
+CREATE TABLE IF NOT EXISTS budget_line_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_sheet TEXT NOT NULL DEFAULT 'Living Expenses',
+  source_row INTEGER NOT NULL DEFAULT 0,
+  section TEXT NOT NULL DEFAULT '',
+  label TEXT NOT NULL DEFAULT '',
+  category TEXT NOT NULL DEFAULT '',
+  monthly_amount INTEGER NOT NULL DEFAULT 0,
+  annual_amount INTEGER NOT NULL DEFAULT 0,
+  notes TEXT DEFAULT '',
+  support_scope TEXT NOT NULL DEFAULT 'none',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(source_sheet, source_row)
 )`
 
 const CREATE_INCOME_ENTRIES = `
@@ -65,6 +115,29 @@ CREATE TABLE IF NOT EXISTS income_entries (
   updated_at INTEGER NOT NULL
 )`
 
+const CREATE_EXPECTED_INCOME_ENTRIES = `
+CREATE TABLE IF NOT EXISTS expected_income_entries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL DEFAULT '',
+  notes TEXT DEFAULT '',
+  annual_amount INTEGER NOT NULL DEFAULT 0,
+  income_kind TEXT NOT NULL DEFAULT 'other',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+)`
+
+const CREATE_INCOME_TAX_SETTINGS = `
+CREATE TABLE IF NOT EXISTS income_tax_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+)`
+
+const CREATE_APP_META = `
+CREATE TABLE IF NOT EXISTS app_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+)`
+
 const CREATE_CATEGORY_MAPPING_RULES = `
 CREATE TABLE IF NOT EXISTS category_mapping_rules (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -75,25 +148,484 @@ CREATE TABLE IF NOT EXISTS category_mapping_rules (
   created_at INTEGER NOT NULL
 )`
 
-const DEFAULT_NEEDS = [
-  ['Rent', 2800],
-  ['Utilities', 150],
-  ['Insurance', 200],
-  ['Groceries', 400],
-  ['Gas', 100],
-  ['Phone', 80],
-  ['Subscriptions', 50],
-  ['Healthcare', 100]
+const WORKBOOK_BUDGET_DEFAULTS = [
+  { category: 'Rent', isNeed: true, standard: 1327, withParents: 1327, withAid: 1327 },
+  { category: 'Utilities', isNeed: true, standard: 135, withParents: 135, withAid: 135 },
+  { category: 'Groceries', isNeed: true, standard: 500, withParents: 500, withAid: 234 },
+  { category: 'Coffee', isNeed: true, standard: 84, withParents: 84, withAid: 84 },
+  { category: 'Phone Bill', isNeed: true, standard: 55, withParents: 0, withAid: 0 },
+  { category: 'Healthcare', isNeed: true, standard: 350, withParents: 350, withAid: 0 },
+  { category: 'Internet', isNeed: true, standard: 0, withParents: 0, withAid: 0 },
+  { category: 'Gas/Automotive', isNeed: true, standard: 0, withParents: 0, withAid: 0 },
+  { category: 'Car Rental', isNeed: true, standard: 0, withParents: 0, withAid: 0 },
+  { category: 'Transportation', isNeed: true, standard: 25, withParents: 25, withAid: 25 },
+  { category: 'Subscriptions', isNeed: true, standard: 151, withParents: 132, withAid: 132 },
+  { category: 'Insurance', isNeed: true, standard: 23, withParents: 23, withAid: 23 },
+  { category: 'Other Services', isNeed: true, standard: 18, withParents: 18, withAid: 18 },
+  { category: 'Dining', isNeed: false, standard: 320, withParents: 320, withAid: 320 },
+  { category: 'Bar/ Alcohol', isNeed: false, standard: 100, withParents: 100, withAid: 100 },
+  { category: 'Travel', isNeed: false, standard: 142, withParents: 142, withAid: 142 },
+  { category: 'Business Expenses', isNeed: false, standard: 84, withParents: 84, withAid: 84 },
+  { category: 'Shopping', isNeed: false, standard: 97, withParents: 97, withAid: 97 },
+  { category: 'Entertainment', isNeed: false, standard: 47.5, withParents: 47.5, withAid: 47.5 },
+  { category: 'AI Fees', isNeed: false, standard: 10, withParents: 10, withAid: 10 },
+  { category: 'Misc', isNeed: false, standard: 30, withParents: 30, withAid: 30 }
 ] as const
 
-const DEFAULT_NICE_TO_HAVES = [
-  ['Dining Out', 300],
-  ['Bars', 150],
-  ['Shopping', 200],
-  ['Entertainment', 100],
-  ['Personal Care', 80],
-  ['Business Expenses', 200]
+const DEFAULT_NEEDS = WORKBOOK_BUDGET_DEFAULTS.filter((item) => item.isNeed)
+const DEFAULT_NICE_TO_HAVES = WORKBOOK_BUDGET_DEFAULTS.filter((item) => !item.isNeed)
+
+const WORKBOOK_BUDGET_LINES: ReadonlyArray<
+  Pick<BudgetLineItem, 'source_sheet' | 'source_row' | 'section' | 'label' | 'category' | 'notes' | 'support_scope'> & {
+    monthly: number
+  }
+> = [
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 38,
+    section: 'Must-Have Expenses',
+    label: 'Rent or Mortgage',
+    category: 'Rent',
+    monthly: 1327,
+    notes: 'lowest rent for SF 3 person app ~ $1.4k',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 39,
+    section: 'Must-Have Expenses',
+    label: 'Utilities',
+    category: 'Utilities',
+    monthly: 85,
+    notes: 'Wifi: $25, Gas & Electric: 30-60 (Dont pay water + garbage)',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 40,
+    section: 'Must-Have Expenses',
+    label: 'Monthly cleaning',
+    category: 'Utilities',
+    monthly: 50,
+    notes: '$200 cleaning monthly',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 41,
+    section: 'Must-Have Expenses',
+    label: 'Renters Insurance',
+    category: 'Rent',
+    monthly: 0,
+    notes: "(Based on GPT estimate of $20-30/mo) ($300/yr) - Dont think we're paying this at Russian hill",
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 43,
+    section: 'Must-Have Expenses',
+    label: 'Food ($212/week)',
+    category: 'Groceries',
+    monthly: 500,
+    notes: "based off of dad's weekly + $150 - Adjusted to be more accurate 4/14/26",
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 44,
+    section: 'Must-Have Expenses',
+    label: 'Coffee/ Yerbs',
+    category: 'Coffee',
+    monthly: 84,
+    notes: '(coffee every other day at $6)',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 45,
+    section: 'Must-Have Expenses',
+    label: 'Phone Bill',
+    category: 'Phone Bill',
+    monthly: 55,
+    notes: '($70 if I go individual, $55 if I stay on family plan)',
+    support_scope: 'parental'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 46,
+    section: 'Must-Have Expenses',
+    label: 'Healthcare',
+    category: 'Healthcare',
+    monthly: 350,
+    notes: 'Covered California Estimate on Bronze Plan',
+    support_scope: 'government'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 47,
+    section: 'Must-Have Expenses',
+    label: 'Haircuts',
+    category: 'Other Services',
+    monthly: 18,
+    notes: '(Haircuts every 3months at $55)',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 48,
+    section: 'Must-Have Expenses',
+    label: 'Cleaning Supplies, Cooking Supplies, household stuff',
+    category: 'Shopping',
+    monthly: 9,
+    notes: '(Estimated $100/yr)',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 49,
+    section: 'Must-Have Expenses',
+    label: 'Toiletries, Deodorant, tooth paste, razors, shaving creme, moisterizer',
+    category: 'Shopping',
+    monthly: 6,
+    notes: '(Estimated $70/yr)',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 50,
+    section: 'Must-Have Expenses',
+    label: 'Transportation',
+    category: 'Transportation',
+    monthly: 25,
+    notes: '(Estimated $25/mo)',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 53,
+    section: 'Subscriptions',
+    label: 'Spotify Subscription',
+    category: 'Subscriptions',
+    monthly: 12,
+    notes: '($144/yr)',
+    support_scope: 'parental'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 54,
+    section: 'Subscriptions',
+    label: 'Netflix subscription',
+    category: 'Subscriptions',
+    monthly: 7,
+    notes: '($84/yr)',
+    support_scope: 'parental'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 56,
+    section: 'Subscriptions',
+    label: "Credit Card's (Venture X) (Annual: 350)",
+    category: 'Subscriptions',
+    monthly: 30,
+    notes: '($350/yr)',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 57,
+    section: 'Subscriptions',
+    label: 'Amazon prime',
+    category: 'Subscriptions',
+    monthly: 0,
+    notes: '($144/yr) (Canceled Summer of 2025)',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 58,
+    section: 'Subscriptions',
+    label: 'Phootography Website',
+    category: 'Subscriptions',
+    monthly: 29,
+    notes: '($348/yr) (Downgraded plan 2/3/25 from $442/yr)',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 59,
+    section: 'Subscriptions',
+    label: 'Photography Insurance (Full Frame)',
+    category: 'Insurance',
+    monthly: 23,
+    notes: '$271/yr) (*** Charged $366 in 2025)',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 60,
+    section: 'Subscriptions',
+    label: 'Stimsonphoto.com domain ($31/yr)',
+    category: 'Subscriptions',
+    monthly: 2.6,
+    notes: '($26/yr) (was 52 now 62.50 for 2 years as of may 2026)',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 61,
+    section: 'Subscriptions',
+    label: 'Adobe Subscription',
+    category: 'Subscriptions',
+    monthly: 40,
+    notes: 'Now $480/yr (before August 2025 it was $240/yr)',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 62,
+    section: 'Subscriptions',
+    label: 'Storage (G photos: $10 + G photos: $2 + icloud: $3)',
+    category: 'Subscriptions',
+    monthly: 15,
+    notes: '($180/yr)',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 63,
+    section: 'Subscriptions',
+    label: 'Apple Care+ 14in Macbook pro',
+    category: 'Subscriptions',
+    monthly: 8.4,
+    notes: '($100 per year)',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 64,
+    section: 'Subscriptions',
+    label: 'DJI Care Refresh - MA2PRO',
+    category: 'Subscriptions',
+    monthly: 7,
+    notes: '($170 per 2 years)',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 65,
+    section: 'Subscriptions',
+    label: 'Canceled: Headspace (Was $6), Audible (Was $16)',
+    category: 'Subscriptions',
+    monthly: 0,
+    notes: '',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 72,
+    section: 'Nice-to-Have Expenses',
+    label: 'Going out (Food)',
+    category: 'Dining',
+    monthly: 320,
+    notes: '(Go out to eat 5x per week at $16/meal',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 73,
+    section: 'Nice-to-Have Expenses',
+    label: 'Going out (Drinks)',
+    category: 'Bar/ Alcohol',
+    monthly: 100,
+    notes: '($35 every week) - reduced to $100 4/14/26',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 74,
+    section: 'Nice-to-Have Expenses',
+    label: 'Travel',
+    category: 'Travel',
+    monthly: 142,
+    notes: 'Spend 2k on travel annually? (- $300 travel credit)',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 75,
+    section: 'Nice-to-Have Expenses',
+    label: 'New gadgets/ Camera gear',
+    category: 'Business Expenses',
+    monthly: 84,
+    notes: '$1k a year on new gear?',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 76,
+    section: 'Nice-to-Have Expenses',
+    label: 'Film Photography (Film+ Developing+new gear)',
+    category: 'Shopping',
+    monthly: 42,
+    notes: '220 Film Photos personal use (Jan-May 2024) -> $1 per image = 660 film images per year -> $660 per year ($350/year on new gear) (reduced by 50%)',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 77,
+    section: 'Nice-to-Have Expenses',
+    label: 'Zyns',
+    category: 'Shopping',
+    monthly: 17,
+    notes: '2 packs per month',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 78,
+    section: 'Nice-to-Have Expenses',
+    label: 'New Clothing',
+    category: 'Shopping',
+    monthly: 23,
+    notes: '(Estimated $275/yr)',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 79,
+    section: 'Nice-to-Have Expenses',
+    label: 'Weekly Movies (Tuesday Deals)',
+    category: 'Entertainment',
+    monthly: 30,
+    notes: '($7.5/week)',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 80,
+    section: 'Nice-to-Have Expenses',
+    label: 'Concerts',
+    category: 'Entertainment',
+    monthly: 17.5,
+    notes: '(6 concerts a year at $35 average ticket price)',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 81,
+    section: 'Nice-to-Have Expenses',
+    label: 'AI Fees',
+    category: 'AI Fees',
+    monthly: 10,
+    notes: '',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 82,
+    section: 'Nice-to-Have Expenses',
+    label: 'Miscillaneous purchases',
+    category: 'Misc',
+    monthly: 30,
+    notes: '',
+    support_scope: 'none'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 87,
+    section: 'Parental & Gov Help',
+    label: 'Spotify',
+    category: 'Subscriptions',
+    monthly: 12,
+    notes: '($144/yr)',
+    support_scope: 'parental'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 88,
+    section: 'Parental & Gov Help',
+    label: 'Netflix',
+    category: 'Subscriptions',
+    monthly: 7,
+    notes: '($84/yr)',
+    support_scope: 'parental'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 89,
+    section: 'Parental & Gov Help',
+    label: 'Phone Bill',
+    category: 'Phone Bill',
+    monthly: 55,
+    notes: '($70 if I go individual, $55 if I stay on family plan)',
+    support_scope: 'parental'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 92,
+    section: 'Parental & Gov Help',
+    label: 'EBT Snap Food Plan (as of Jan 2026)',
+    category: 'Groceries',
+    monthly: 266,
+    notes: '(Will go down in 2026 when I declare my new income)',
+    support_scope: 'government'
+  },
+  {
+    source_sheet: 'Living Expenses',
+    source_row: 93,
+    section: 'Parental & Gov Help',
+    label: 'Medical (free as of Jan 2026)',
+    category: 'Healthcare',
+    monthly: 350,
+    notes: '',
+    support_scope: 'government'
+  }
 ] as const
+
+const WORKBOOK_CATEGORY_RENAMES = [
+  ['Dining Out', 'Dining'],
+  ['Bars', 'Bar/ Alcohol'],
+  ['Gas', 'Transportation'],
+  ['Personal Care', 'Other Services'],
+  ['Phone', 'Phone Bill']
+] as const
+
+const DEFAULT_EXPECTED_INCOME: ReadonlyArray<Pick<ExpectedIncomeEntry, 'name' | 'notes' | 'annual_amount' | 'income_kind'>> = [
+  {
+    name: 'Bartending',
+    notes: 'Workbook estimate: $35/hr, 25hr weeks, 48wk years.',
+    annual_amount: cents(42000),
+    income_kind: 'w2'
+  },
+  {
+    name: 'Part-time Freelance Photography',
+    notes: 'Snappr and corporate event shoots estimated at $2k per month.',
+    annual_amount: cents(24000),
+    income_kind: 'self_employment'
+  },
+  {
+    name: 'Photography Lessons',
+    notes: 'Assuming 1 lesson per month at $75 each.',
+    annual_amount: cents(900),
+    income_kind: 'self_employment'
+  },
+  {
+    name: 'Baja Montecito',
+    notes: 'Workbook placeholder.',
+    annual_amount: 0,
+    income_kind: 'other'
+  }
+]
+
+const DEFAULT_TAX_SETTINGS: IncomeTaxSettings = {
+  filing_status: 'single',
+  retirement_contribution: cents(1000),
+  above_line_deductions: 0,
+  federal_standard_deduction: cents(15750),
+  ca_standard_deduction: cents(5706),
+  ca_bracket_adjustment: cents(5202),
+  social_security_wage_base: cents(176100)
+}
 
 const DEFAULT_ACCOUNTS: Array<Pick<Account, 'name' | 'type' | 'institution' | 'color'>> = [
   { name: 'Checking', type: 'checking', institution: '', color: '#0ea5e9' },
@@ -103,7 +635,6 @@ const DEFAULT_ACCOUNTS: Array<Pick<Account, 'name' | 'type' | 'institution' | 'c
 ]
 
 const now = (): number => Math.floor(Date.now() / 1000)
-const cents = (dollars: number): number => Math.round(dollars * 100)
 
 export function initDatabase(userDataPath: string): void {
   mkdirSync(userDataPath, { recursive: true })
@@ -112,8 +643,14 @@ export function initDatabase(userDataPath: string): void {
   database.pragma('journal_mode = WAL')
   database.exec(CREATE_ACCOUNTS)
   database.exec(CREATE_TRANSACTIONS)
+  database.exec(CREATE_TRANSACTION_DEDUPE_INDEX)
+  database.exec(CREATE_IMPORTED_FILES)
   database.exec(CREATE_BUDGET_ITEMS)
+  database.exec(CREATE_BUDGET_LINE_ITEMS)
   database.exec(CREATE_INCOME_ENTRIES)
+  database.exec(CREATE_EXPECTED_INCOME_ENTRIES)
+  database.exec(CREATE_INCOME_TAX_SETTINGS)
+  database.exec(CREATE_APP_META)
   database.exec(CREATE_CATEGORY_MAPPING_RULES)
   seedDefaults()
 }
@@ -152,13 +689,141 @@ function seedDefaults(): void {
        VALUES (?, ?, ?, ?, ?, ?, ?)`
     )
     const stamp = now()
-    DEFAULT_NEEDS.forEach(([category, amount]) =>
-      insert.run(category, 1, cents(amount), cents(amount), cents(amount), stamp, stamp)
+    DEFAULT_NEEDS.forEach((item) =>
+      insert.run(
+        item.category,
+        1,
+        cents(item.standard),
+        cents(item.withAid),
+        cents(item.withParents),
+        stamp,
+        stamp
+      )
     )
-    DEFAULT_NICE_TO_HAVES.forEach(([category, amount]) =>
-      insert.run(category, 0, cents(amount), cents(amount), cents(amount), stamp, stamp)
+    DEFAULT_NICE_TO_HAVES.forEach((item) =>
+      insert.run(
+        item.category,
+        0,
+        cents(item.standard),
+        cents(item.withAid),
+        cents(item.withParents),
+        stamp,
+        stamp
+      )
     )
   }
+  runWorkbookBudgetMigration()
+
+  const expectedIncomeCount = db.prepare('SELECT COUNT(*) AS count FROM expected_income_entries').get() as { count: number }
+  if (expectedIncomeCount.count === 0) {
+    const insert = db.prepare(
+      `INSERT INTO expected_income_entries
+       (name, notes, annual_amount, income_kind, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    )
+    const stamp = now()
+    DEFAULT_EXPECTED_INCOME.forEach((entry) =>
+      insert.run(entry.name, entry.notes, entry.annual_amount, entry.income_kind, stamp, stamp)
+    )
+  }
+
+  const taxSettingCount = db.prepare('SELECT COUNT(*) AS count FROM income_tax_settings').get() as { count: number }
+  if (taxSettingCount.count === 0) {
+    const insert = db.prepare('INSERT INTO income_tax_settings (key, value) VALUES (?, ?)')
+    Object.entries(DEFAULT_TAX_SETTINGS).forEach(([key, value]) => insert.run(key, String(value)))
+  }
+}
+
+function runWorkbookBudgetMigration(): void {
+  const db = getDb()
+  const flag = db.prepare('SELECT value FROM app_meta WHERE key = ?').get('workbook_budget_reconciliation_v2')
+  if (flag) return
+
+  WORKBOOK_CATEGORY_RENAMES.forEach(([from, to]) => {
+    const target = db.prepare('SELECT id FROM budget_items WHERE category = ? LIMIT 1').get(to) as
+      | { id: number }
+      | undefined
+    const source = db.prepare('SELECT id FROM budget_items WHERE category = ? LIMIT 1').get(from) as { id: number } | undefined
+    if (source && !target) {
+      db.prepare('UPDATE budget_items SET category = ?, updated_at = ? WHERE id = ?').run(to, now(), source.id)
+    } else if (source && target) {
+      db.prepare('DELETE FROM budget_items WHERE id = ?').run(source.id)
+    }
+    db.prepare('UPDATE transactions SET mapped_category = ? WHERE mapped_category = ?').run(to, from)
+    db.prepare('UPDATE transactions SET raw_category = ? WHERE raw_category = ?').run(to, from)
+    db.prepare('UPDATE category_mapping_rules SET mapped_category = ? WHERE mapped_category = ?').run(to, from)
+  })
+
+  const existing = db.prepare('SELECT id FROM budget_items WHERE category = ? LIMIT 1')
+  const insert = db.prepare(
+    `INSERT INTO budget_items
+     (category, is_need, amount_standard, amount_with_aid, amount_with_parents, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  )
+  const update = db.prepare(
+    `UPDATE budget_items
+     SET is_need = ?, amount_standard = ?, amount_with_aid = ?, amount_with_parents = ?, updated_at = ?
+     WHERE id = ?`
+  )
+  const upsertLine = db.prepare(
+    `INSERT INTO budget_line_items
+     (source_sheet, source_row, section, label, category, monthly_amount, annual_amount, notes, support_scope, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(source_sheet, source_row) DO UPDATE SET
+       section = excluded.section,
+       label = excluded.label,
+       category = excluded.category,
+       monthly_amount = excluded.monthly_amount,
+       annual_amount = excluded.annual_amount,
+       notes = excluded.notes,
+       support_scope = excluded.support_scope,
+       updated_at = excluded.updated_at`
+  )
+  const stamp = now()
+  WORKBOOK_BUDGET_DEFAULTS.forEach((item) => {
+    const row = existing.get(item.category) as { id: number } | undefined
+    if (row) {
+      update.run(
+        item.isNeed ? 1 : 0,
+        cents(item.standard),
+        cents(item.withAid),
+        cents(item.withParents),
+        stamp,
+        row.id
+      )
+    } else {
+      insert.run(
+        item.category,
+        item.isNeed ? 1 : 0,
+        cents(item.standard),
+        cents(item.withAid),
+        cents(item.withParents),
+        stamp,
+        stamp
+      )
+    }
+  })
+  WORKBOOK_BUDGET_LINES.forEach((item) => {
+    const monthly = cents(item.monthly)
+    upsertLine.run(
+      item.source_sheet,
+      item.source_row,
+      item.section,
+      item.label,
+      item.category,
+      monthly,
+      monthly * 12,
+      item.notes,
+      item.support_scope,
+      stamp,
+      stamp
+    )
+  })
+  db.prepare(
+    `INSERT INTO app_meta (key, value)
+     VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+  ).run('workbook_budget_reconciliation_v2', String(stamp))
 }
 
 function parseAccountType(value: unknown): AccountType {
@@ -167,6 +832,18 @@ function parseAccountType(value: unknown): AccountType {
 
 function parseSource(value: unknown): TransactionSource {
   return value === 'csv_import' || value === 'ai' ? value : 'manual'
+}
+
+function parseIncomeKind(value: unknown): IncomeKind {
+  return value === 'w2' || value === 'self_employment' ? value : 'other'
+}
+
+function parseFilingStatus(value: unknown): FilingStatus {
+  return value === 'single' ? value : 'single'
+}
+
+function parseBudgetSupportScope(value: unknown): BudgetSupportScope {
+  return value === 'parental' || value === 'government' ? value : 'none'
 }
 
 function rowToAccount(row: unknown): Account {
@@ -198,6 +875,41 @@ function rowToTransaction(row: unknown): Transaction {
   }
 }
 
+function parseImportedFilePreview(value: unknown): ImportedFilePreview {
+  try {
+    const parsed = JSON.parse(String(value ?? '{}')) as Partial<ImportedFilePreview>
+    return {
+      headers: Array.isArray(parsed.headers) ? parsed.headers.map(String) : [],
+      rows: Array.isArray(parsed.rows)
+        ? parsed.rows.map((row) => Array.isArray(row) ? row.map(String) : [])
+        : [],
+      rowCount: Number(parsed.rowCount ?? 0),
+      columnCount: Number(parsed.columnCount ?? 0)
+    }
+  } catch {
+    return { headers: [], rows: [], rowCount: 0, columnCount: 0 }
+  }
+}
+
+function rowToImportedFile(row: unknown): ImportedFileRecord {
+  const r = row as Record<string, unknown>
+  return {
+    id: Number(r.id),
+    file_name: String(r.file_name ?? ''),
+    file_path: String(r.file_path ?? ''),
+    file_size: Number(r.file_size ?? 0),
+    file_type: String(r.file_type ?? ''),
+    account_id: r.account_id === null || r.account_id === undefined ? null : Number(r.account_id),
+    imported_count: Number(r.imported_count ?? 0),
+    skipped_count: Number(r.skipped_count ?? 0),
+    error_count: Number(r.error_count ?? 0),
+    first_transaction_date: r.first_transaction_date === null || r.first_transaction_date === undefined ? null : Number(r.first_transaction_date),
+    last_transaction_date: r.last_transaction_date === null || r.last_transaction_date === undefined ? null : Number(r.last_transaction_date),
+    preview: parseImportedFilePreview(r.preview_json),
+    created_at: Number(r.created_at ?? 0)
+  }
+}
+
 function rowToBudgetItem(row: unknown): BudgetItem {
   const r = row as Record<string, unknown>
   return {
@@ -212,6 +924,24 @@ function rowToBudgetItem(row: unknown): BudgetItem {
   }
 }
 
+function rowToBudgetLineItem(row: unknown): BudgetLineItem {
+  const r = row as Record<string, unknown>
+  return {
+    id: Number(r.id),
+    source_sheet: String(r.source_sheet ?? ''),
+    source_row: Number(r.source_row ?? 0),
+    section: String(r.section ?? ''),
+    label: String(r.label ?? ''),
+    category: String(r.category ?? ''),
+    monthly_amount: Number(r.monthly_amount ?? 0),
+    annual_amount: Number(r.annual_amount ?? 0),
+    notes: String(r.notes ?? ''),
+    support_scope: parseBudgetSupportScope(r.support_scope),
+    created_at: Number(r.created_at ?? 0),
+    updated_at: Number(r.updated_at ?? 0)
+  }
+}
+
 function rowToIncomeEntry(row: unknown): IncomeEntry {
   const r = row as Record<string, unknown>
   return {
@@ -221,6 +951,19 @@ function rowToIncomeEntry(row: unknown): IncomeEntry {
     date: Number(r.date ?? 0),
     amount: Number(r.amount ?? 0),
     notes: String(r.notes ?? ''),
+    created_at: Number(r.created_at ?? 0),
+    updated_at: Number(r.updated_at ?? 0)
+  }
+}
+
+function rowToExpectedIncomeEntry(row: unknown): ExpectedIncomeEntry {
+  const r = row as Record<string, unknown>
+  return {
+    id: Number(r.id),
+    name: String(r.name ?? ''),
+    notes: String(r.notes ?? ''),
+    annual_amount: Number(r.annual_amount ?? 0),
+    income_kind: parseIncomeKind(r.income_kind),
     created_at: Number(r.created_at ?? 0),
     updated_at: Number(r.updated_at ?? 0)
   }
@@ -272,11 +1015,73 @@ export function getTransactionsByPeriod(start: number, end: number): Transaction
   return getAllTransactions({ start, end })
 }
 
+function normalizeDuplicateDescription(description: string): string {
+  return description.trim().toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, ' ').trim()
+}
+
+export function getImportedFiles(filters: { start?: number; end?: number } = {}): ImportedFileRecord[] {
+  const clauses: string[] = []
+  const params: number[] = []
+  if (filters.start !== undefined && filters.end !== undefined) {
+    clauses.push(
+      `(
+        (first_transaction_date IS NOT NULL AND last_transaction_date IS NOT NULL AND first_transaction_date <= ? AND last_transaction_date >= ?)
+        OR (first_transaction_date IS NULL AND created_at >= ? AND created_at <= ?)
+      )`
+    )
+    params.push(filters.end, filters.start, filters.start, filters.end)
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
+  return getDb()
+    .prepare(`SELECT * FROM imported_files ${where} ORDER BY created_at DESC, id DESC`)
+    .all(...params)
+    .map(rowToImportedFile)
+}
+
+export function recordImportedFile(data: {
+  file_name: string
+  file_path: string
+  file_size: number
+  file_type: string
+  account_id: number | null
+  imported_count: number
+  skipped_count: number
+  error_count: number
+  first_transaction_date: number | null
+  last_transaction_date: number | null
+  preview: ImportedFilePreview
+}): ImportedFileRecord {
+  const result = getDb()
+    .prepare(
+      `INSERT INTO imported_files
+       (file_name, file_path, file_size, file_type, account_id, imported_count, skipped_count, error_count,
+        first_transaction_date, last_transaction_date, preview_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      data.file_name,
+      data.file_path,
+      data.file_size,
+      data.file_type,
+      data.account_id,
+      data.imported_count,
+      data.skipped_count,
+      data.error_count,
+      data.first_transaction_date,
+      data.last_transaction_date,
+      JSON.stringify(data.preview),
+      now()
+    )
+  const row = getDb().prepare('SELECT * FROM imported_files WHERE id = ?').get(Number(result.lastInsertRowid))
+  return rowToImportedFile(row)
+}
+
 export function transactionExists(date: number, description: string, amount: number): boolean {
-  const row = getDb()
-    .prepare('SELECT id FROM transactions WHERE date = ? AND description = ? AND amount = ? LIMIT 1')
-    .get(date, description, amount)
-  return Boolean(row)
+  const rows = getDb()
+    .prepare('SELECT description FROM transactions WHERE date = ? AND amount = ?')
+    .all(date, amount) as Array<{ description: string }>
+  const normalized = normalizeDuplicateDescription(description)
+  return rows.some((row) => normalizeDuplicateDescription(row.description) === normalized)
 }
 
 export function createTransaction(data: Partial<Transaction>): Transaction {
@@ -328,6 +1133,25 @@ export function deleteTransaction(id: number): void {
   getDb().prepare('DELETE FROM transactions WHERE id = ?').run(id)
 }
 
+export function deleteTransactions(ids: number[]): { deleted: number } {
+  const uniqueIds = Array.from(new Set(ids.filter((id) => Number.isInteger(id) && id > 0)))
+  if (uniqueIds.length === 0) return { deleted: 0 }
+  const remove = getDb().prepare('DELETE FROM transactions WHERE id = ?')
+  const run = getDb().transaction((nextIds: number[]) => {
+    let deleted = 0
+    nextIds.forEach((id) => {
+      deleted += remove.run(id).changes
+    })
+    return deleted
+  })
+  return { deleted: run(uniqueIds) }
+}
+
+export function deleteAllTransactions(): { deleted: number } {
+  const result = getDb().prepare('DELETE FROM transactions').run()
+  return { deleted: result.changes }
+}
+
 function getTransactionById(id: number): Transaction {
   const row = getDb().prepare('SELECT * FROM transactions WHERE id = ?').get(id)
   if (!row) throw new Error(`Transaction ${id} not found`)
@@ -339,6 +1163,108 @@ export function getAllBudgetItems(_budgetType?: BudgetType): BudgetItem[] {
     .prepare('SELECT * FROM budget_items ORDER BY is_need DESC, category ASC')
     .all()
     .map(rowToBudgetItem)
+}
+
+export function getAllBudgetLineItems(): BudgetLineItem[] {
+  return getDb()
+    .prepare('SELECT * FROM budget_line_items ORDER BY source_row ASC')
+    .all()
+    .map(rowToBudgetLineItem)
+}
+
+export function createBudgetLineItem(data: Partial<BudgetLineItem>): BudgetLineItem {
+  const stamp = now()
+  const monthly = Math.round(data.monthly_amount ?? 0)
+  const sourceSheet = data.source_sheet ?? 'Living Expenses'
+  const sourceRow = data.source_row ?? nextBudgetLineSourceRow(sourceSheet)
+  const result = getDb()
+    .prepare(
+      `INSERT INTO budget_line_items
+       (source_sheet, source_row, section, label, category, monthly_amount, annual_amount, notes, support_scope, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      sourceSheet,
+      sourceRow,
+      data.section ?? '',
+      data.label ?? '',
+      data.category ?? '',
+      monthly,
+      Math.round(data.annual_amount ?? monthly * 12),
+      data.notes ?? '',
+      parseBudgetSupportScope(data.support_scope),
+      stamp,
+      stamp
+    )
+  const created = getBudgetLineItemById(Number(result.lastInsertRowid))
+  syncBudgetItemTotalsForCategory(created.category)
+  return created
+}
+
+export function updateBudgetLineItem(id: number, data: Partial<BudgetLineItem>): BudgetLineItem {
+  const existing = getBudgetLineItemById(id)
+  const monthly = Math.round(data.monthly_amount ?? existing.monthly_amount)
+  getDb()
+    .prepare(
+      `UPDATE budget_line_items
+       SET source_sheet = ?, source_row = ?, section = ?, label = ?, category = ?,
+           monthly_amount = ?, annual_amount = ?, notes = ?, support_scope = ?, updated_at = ?
+       WHERE id = ?`
+    )
+    .run(
+      data.source_sheet ?? existing.source_sheet,
+      data.source_row ?? existing.source_row,
+      data.section ?? existing.section,
+      data.label ?? existing.label,
+      data.category ?? existing.category,
+      monthly,
+      Math.round(data.annual_amount ?? monthly * 12),
+      data.notes ?? existing.notes,
+      parseBudgetSupportScope(data.support_scope ?? existing.support_scope),
+      now(),
+      id
+    )
+  const updated = getBudgetLineItemById(id)
+  syncBudgetItemTotalsForCategory(existing.category)
+  if (updated.category !== existing.category) syncBudgetItemTotalsForCategory(updated.category)
+  return updated
+}
+
+export function deleteBudgetLineItem(id: number): void {
+  const existing = getBudgetLineItemById(id)
+  getDb().prepare('DELETE FROM budget_line_items WHERE id = ?').run(id)
+  syncBudgetItemTotalsForCategory(existing.category)
+}
+
+function getBudgetLineItemById(id: number): BudgetLineItem {
+  const row = getDb().prepare('SELECT * FROM budget_line_items WHERE id = ?').get(id)
+  if (!row) throw new Error(`Budget line item ${id} not found`)
+  return rowToBudgetLineItem(row)
+}
+
+function nextBudgetLineSourceRow(sourceSheet: string): number {
+  const row = getDb()
+    .prepare('SELECT MAX(source_row) AS maxRow FROM budget_line_items WHERE source_sheet = ?')
+    .get(sourceSheet) as { maxRow?: number | null } | undefined
+  return Math.max(1, Number(row?.maxRow ?? 0) + 1)
+}
+
+function syncBudgetItemTotalsForCategory(category: string): void {
+  if (!category.trim()) return
+  const lines = getDb()
+    .prepare("SELECT monthly_amount, support_scope FROM budget_line_items WHERE category = ? AND section <> 'Parental & Gov Help'")
+    .all(category)
+    .map(rowToBudgetLineItem)
+  const standard = lines.reduce((sum, line) => sum + line.monthly_amount, 0)
+  const withParents = lines.reduce((sum, line) => sum + (line.support_scope === 'parental' ? 0 : line.monthly_amount), 0)
+  const withAid = lines.reduce((sum, line) => sum + (line.support_scope === 'parental' || line.support_scope === 'government' ? 0 : line.monthly_amount), 0)
+  getDb()
+    .prepare(
+      `UPDATE budget_items
+       SET amount_standard = ?, amount_with_aid = ?, amount_with_parents = ?, updated_at = ?
+       WHERE category = ?`
+    )
+    .run(standard, withAid, withParents, now(), category)
 }
 
 export function createBudgetItem(data: Partial<BudgetItem>): BudgetItem {
@@ -469,6 +1395,114 @@ function getIncomeEntryById(id: number): IncomeEntry {
   const row = getDb().prepare('SELECT * FROM income_entries WHERE id = ?').get(id)
   if (!row) throw new Error(`Income entry ${id} not found`)
   return rowToIncomeEntry(row)
+}
+
+export function getAllExpectedIncomeEntries(): ExpectedIncomeEntry[] {
+  return getDb().prepare('SELECT * FROM expected_income_entries ORDER BY id ASC').all().map(rowToExpectedIncomeEntry)
+}
+
+export function createExpectedIncomeEntry(data: Partial<ExpectedIncomeEntry>): ExpectedIncomeEntry {
+  const stamp = now()
+  const result = getDb()
+    .prepare(
+      `INSERT INTO expected_income_entries
+       (name, notes, annual_amount, income_kind, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      data.name ?? 'New Income Source',
+      data.notes ?? '',
+      Math.round(data.annual_amount ?? 0),
+      data.income_kind ?? 'other',
+      stamp,
+      stamp
+    )
+  return getExpectedIncomeEntryById(Number(result.lastInsertRowid))
+}
+
+export function updateExpectedIncomeEntry(id: number, data: Partial<ExpectedIncomeEntry>): ExpectedIncomeEntry {
+  const existing = getExpectedIncomeEntryById(id)
+  getDb()
+    .prepare(
+      `UPDATE expected_income_entries
+       SET name = ?, notes = ?, annual_amount = ?, income_kind = ?, updated_at = ?
+       WHERE id = ?`
+    )
+    .run(
+      data.name ?? existing.name,
+      data.notes ?? existing.notes,
+      Math.round(data.annual_amount ?? existing.annual_amount),
+      data.income_kind ?? existing.income_kind,
+      now(),
+      id
+    )
+  return getExpectedIncomeEntryById(id)
+}
+
+export function deleteExpectedIncomeEntry(id: number): void {
+  getDb().prepare('DELETE FROM expected_income_entries WHERE id = ?').run(id)
+}
+
+function getExpectedIncomeEntryById(id: number): ExpectedIncomeEntry {
+  const row = getDb().prepare('SELECT * FROM expected_income_entries WHERE id = ?').get(id)
+  if (!row) throw new Error(`Expected income entry ${id} not found`)
+  return rowToExpectedIncomeEntry(row)
+}
+
+export function getIncomeTaxSettings(): IncomeTaxSettings {
+  const rows = getDb().prepare('SELECT key, value FROM income_tax_settings').all() as Array<{ key: string; value: string }>
+  const values = new Map(rows.map((row) => [row.key, row.value]))
+  return {
+    filing_status: parseFilingStatus(values.get('filing_status')),
+    retirement_contribution: numberSetting(values, 'retirement_contribution'),
+    above_line_deductions: numberSetting(values, 'above_line_deductions'),
+    federal_standard_deduction: numberSetting(values, 'federal_standard_deduction'),
+    ca_standard_deduction: numberSetting(values, 'ca_standard_deduction'),
+    ca_bracket_adjustment: numberSetting(values, 'ca_bracket_adjustment'),
+    social_security_wage_base: numberSetting(values, 'social_security_wage_base')
+  }
+}
+
+export function updateIncomeTaxSettings(data: Partial<IncomeTaxSettings>): IncomeTaxSettings {
+  const upsert = getDb().prepare(
+    `INSERT INTO income_tax_settings (key, value)
+     VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+  )
+  Object.entries(data).forEach(([key, value]) => {
+    if (value !== undefined) upsert.run(key, String(value))
+  })
+  return getIncomeTaxSettings()
+}
+
+export function getAppMetaValue(key: string): string | null {
+  const row = getDb().prepare('SELECT value FROM app_meta WHERE key = ?').get(key) as { value: string } | undefined
+  return typeof row?.value === 'string' ? row.value : null
+}
+
+export function setAppMetaValue(key: string, value: string): void {
+  getDb()
+    .prepare(
+      `INSERT INTO app_meta (key, value)
+       VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+    )
+    .run(key, value)
+}
+
+export function deleteAppMetaValues(keys: string[]): void {
+  if (keys.length === 0) return
+  const remove = getDb().prepare('DELETE FROM app_meta WHERE key = ?')
+  const run = getDb().transaction((nextKeys: string[]) => {
+    nextKeys.forEach((key) => remove.run(key))
+  })
+  run(keys)
+}
+
+function numberSetting(values: Map<string, string>, key: keyof IncomeTaxSettings): number {
+  const fallback = DEFAULT_TAX_SETTINGS[key]
+  const parsed = Number(values.get(key))
+  return Number.isFinite(parsed) ? parsed : typeof fallback === 'number' ? fallback : 0
 }
 
 export function getAllCategoryRules(): CategoryMappingRule[] {

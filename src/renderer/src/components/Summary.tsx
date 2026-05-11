@@ -27,7 +27,7 @@ export function Summary() {
   const chartData = months.map((month) => {
     const start = Math.floor(startOfMonth(month).getTime() / 1000)
     const end = Math.floor(endOfMonth(month).getTime() / 1000)
-    const spent = transactions.filter((tx) => tx.amount > 0 && tx.date >= start && tx.date <= end).reduce((sum, tx) => sum + tx.amount, 0)
+    const spent = transactions.filter((tx) => tx.amount !== 0 && tx.date >= start && tx.date <= end).reduce((sum, tx) => sum + tx.amount, 0)
     const monthlyBudget = budget.reduce((sum, item) => sum + getBudgetAmount(item, getStoredBudgetType()), 0)
     return { month: format(month, 'MMM'), spent: spent / 100, budget: monthlyBudget / 100, spentCents: spent, budgetCents: monthlyBudget }
   })
@@ -36,7 +36,7 @@ export function Summary() {
     <div className="h-full overflow-y-auto px-8 py-8">
       <div className="mb-5 flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">Summary</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">Expenses Summary</h1>
           <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">Monthly budget comparison by total and category.</p>
         </div>
         <div className="flex rounded-full bg-zinc-100 p-1 text-[12px] dark:bg-zinc-800">
@@ -80,7 +80,7 @@ export function Summary() {
                 {months.map((month) => {
                   const start = Math.floor(startOfMonth(month).getTime() / 1000)
                   const end = Math.floor(endOfMonth(month).getTime() / 1000)
-                  const spent = transactions.filter((tx) => tx.amount > 0 && tx.mapped_category === item.category && tx.date >= start && tx.date <= end).reduce((sum, tx) => sum + tx.amount, 0)
+                  const spent = transactions.filter((tx) => tx.amount !== 0 && tx.mapped_category === item.category && tx.date >= start && tx.date <= end).reduce((sum, tx) => sum + tx.amount, 0)
                   const under = spent <= getBudgetAmount(item, getStoredBudgetType())
                   return (
                     <td key={month.toISOString()} className={`px-4 py-3 text-right ${under ? 'bg-emerald-50/40 text-emerald-800 dark:bg-emerald-950/10 dark:text-emerald-300' : 'bg-red-50/50 text-red-800 dark:bg-red-950/10 dark:text-red-300'}`}>

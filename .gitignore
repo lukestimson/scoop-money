@@ -7,4 +7,5 @@ release
 .env.*
 !.env.example
 .npmrc
+.eslintcache
 *.log
