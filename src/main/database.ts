@@ -20,6 +20,8 @@ import type {
   TransactionFilters,
   TransactionSource
 } from '../types/money'
+import { BUDGET_CATEGORY_ORDER, defaultIsNeedForBudgetCategory } from '../types/budgetCategories'
+import { inferLineIsNeed } from '../types/budgetNeedRules'
 
 let database: Database.Database | null = null
 let databasePath = ''
@@ -98,6 +100,7 @@ CREATE TABLE IF NOT EXISTS budget_line_items (
   annual_amount INTEGER NOT NULL DEFAULT 0,
   notes TEXT DEFAULT '',
   support_scope TEXT NOT NULL DEFAULT 'none',
+  is_need INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   UNIQUE(source_sheet, source_row)
@@ -153,11 +156,8 @@ const WORKBOOK_BUDGET_DEFAULTS = [
   { category: 'Utilities', isNeed: true, standard: 135, withParents: 135, withAid: 135 },
   { category: 'Groceries', isNeed: true, standard: 500, withParents: 500, withAid: 234 },
   { category: 'Coffee', isNeed: true, standard: 84, withParents: 84, withAid: 84 },
-  { category: 'Phone Bill', isNeed: true, standard: 55, withParents: 0, withAid: 0 },
-  { category: 'Healthcare', isNeed: true, standard: 350, withParents: 350, withAid: 0 },
   { category: 'Internet', isNeed: true, standard: 0, withParents: 0, withAid: 0 },
   { category: 'Gas/Automotive', isNeed: true, standard: 0, withParents: 0, withAid: 0 },
-  { category: 'Car Rental', isNeed: true, standard: 0, withParents: 0, withAid: 0 },
   { category: 'Transportation', isNeed: true, standard: 25, withParents: 25, withAid: 25 },
   { category: 'Subscriptions', isNeed: true, standard: 151, withParents: 132, withAid: 132 },
   { category: 'Insurance', isNeed: true, standard: 23, withParents: 23, withAid: 23 },
@@ -168,8 +168,7 @@ const WORKBOOK_BUDGET_DEFAULTS = [
   { category: 'Business Expenses', isNeed: false, standard: 84, withParents: 84, withAid: 84 },
   { category: 'Shopping', isNeed: false, standard: 97, withParents: 97, withAid: 97 },
   { category: 'Entertainment', isNeed: false, standard: 47.5, withParents: 47.5, withAid: 47.5 },
-  { category: 'AI Fees', isNeed: false, standard: 10, withParents: 10, withAid: 10 },
-  { category: 'Misc', isNeed: false, standard: 30, withParents: 30, withAid: 30 }
+  { category: 'AI Fees', isNeed: false, standard: 10, withParents: 10, withAid: 10 }
 ] as const
 
 const DEFAULT_NEEDS = WORKBOOK_BUDGET_DEFAULTS.filter((item) => item.isNeed)
@@ -245,7 +244,7 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
     source_row: 45,
     section: 'Must-Have Expenses',
     label: 'Phone Bill',
-    category: 'Phone Bill',
+    category: 'Utilities',
     monthly: 55,
     notes: '($70 if I go individual, $55 if I stay on family plan)',
     support_scope: 'parental'
@@ -255,7 +254,7 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
     source_row: 46,
     section: 'Must-Have Expenses',
     label: 'Healthcare',
-    category: 'Healthcare',
+    category: 'Insurance',
     monthly: 350,
     notes: 'Covered California Estimate on Bronze Plan',
     support_scope: 'government'
@@ -525,7 +524,7 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
     source_row: 82,
     section: 'Nice-to-Have Expenses',
     label: 'Miscillaneous purchases',
-    category: 'Misc',
+    category: 'Other Services',
     monthly: 30,
     notes: '',
     support_scope: 'none'
@@ -555,7 +554,7 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
     source_row: 89,
     section: 'Parental & Gov Help',
     label: 'Phone Bill',
-    category: 'Phone Bill',
+    category: 'Utilities',
     monthly: 55,
     notes: '($70 if I go individual, $55 if I stay on family plan)',
     support_scope: 'parental'
@@ -575,7 +574,7 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
     source_row: 93,
     section: 'Parental & Gov Help',
     label: 'Medical (free as of Jan 2026)',
-    category: 'Healthcare',
+    category: 'Insurance',
     monthly: 350,
     notes: '',
     support_scope: 'government'
@@ -652,7 +651,10 @@ export function initDatabase(userDataPath: string): void {
   database.exec(CREATE_INCOME_TAX_SETTINGS)
   database.exec(CREATE_APP_META)
   database.exec(CREATE_CATEGORY_MAPPING_RULES)
+  ensureBudgetLineItemsHasIsNeedColumn()
   seedDefaults()
+  runMoneyBudgetAllowlistMigration()
+  runBudgetLineNeedWorkbookMigration()
 }
 
 export function getDatabasePath(): string {
@@ -767,8 +769,8 @@ function runWorkbookBudgetMigration(): void {
   )
   const upsertLine = db.prepare(
     `INSERT INTO budget_line_items
-     (source_sheet, source_row, section, label, category, monthly_amount, annual_amount, notes, support_scope, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     (source_sheet, source_row, section, label, category, monthly_amount, annual_amount, notes, support_scope, is_need, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(source_sheet, source_row) DO UPDATE SET
        section = excluded.section,
        label = excluded.label,
@@ -777,6 +779,7 @@ function runWorkbookBudgetMigration(): void {
        annual_amount = excluded.annual_amount,
        notes = excluded.notes,
        support_scope = excluded.support_scope,
+       is_need = excluded.is_need,
        updated_at = excluded.updated_at`
   )
   const stamp = now()
@@ -805,6 +808,7 @@ function runWorkbookBudgetMigration(): void {
   })
   WORKBOOK_BUDGET_LINES.forEach((item) => {
     const monthly = cents(item.monthly)
+    const lineIsNeed = item.section.toLowerCase().includes('nice') ? 0 : 1
     upsertLine.run(
       item.source_sheet,
       item.source_row,
@@ -815,6 +819,7 @@ function runWorkbookBudgetMigration(): void {
       monthly * 12,
       item.notes,
       item.support_scope,
+      lineIsNeed,
       stamp,
       stamp
     )
@@ -824,6 +829,87 @@ function runWorkbookBudgetMigration(): void {
      VALUES (?, ?)
      ON CONFLICT(key) DO UPDATE SET value = excluded.value`
   ).run('workbook_budget_reconciliation_v2', String(stamp))
+}
+
+function budgetLineItemsHasIsNeedColumn(db: Database.Database): boolean {
+  const rows = db.prepare('PRAGMA table_info(budget_line_items)').all() as { name: string }[]
+  return rows.some((row) => row.name === 'is_need')
+}
+
+function ensureBudgetLineItemsHasIsNeedColumn(): void {
+  const db = getDb()
+  if (budgetLineItemsHasIsNeedColumn(db)) return
+  db.exec('ALTER TABLE budget_line_items ADD COLUMN is_need INTEGER NOT NULL DEFAULT 1')
+  db.prepare(`UPDATE budget_line_items SET is_need = 0 WHERE lower(section) LIKE '%nice%'`).run()
+  db.prepare(
+    `UPDATE budget_line_items SET is_need = (
+       SELECT CASE WHEN bi.is_need THEN 1 ELSE 0 END FROM budget_items bi WHERE bi.category = budget_line_items.category LIMIT 1
+     ) WHERE EXISTS (SELECT 1 FROM budget_items bi WHERE bi.category = budget_line_items.category)`
+  ).run()
+}
+
+function runMoneyBudgetAllowlistMigration(): void {
+  const db = getDb()
+  ensureBudgetLineItemsHasIsNeedColumn()
+  const flag = db.prepare('SELECT value FROM app_meta WHERE key = ?').get('money_budget_allowlist_v3')
+  if (flag) return
+
+  db.prepare(`UPDATE budget_line_items SET category = 'Utilities' WHERE category = 'Phone Bill'`).run()
+  db.prepare(`UPDATE budget_line_items SET category = 'Insurance' WHERE category IN ('Healthcare', 'Medical')`).run()
+  db.prepare(`UPDATE budget_line_items SET category = 'Travel' WHERE category = 'Car Rental'`).run()
+  db.prepare(`UPDATE budget_line_items SET category = 'Other Services' WHERE category = 'Misc'`).run()
+
+  const placeholders = BUDGET_CATEGORY_ORDER.map(() => '?').join(',')
+  db.prepare(`DELETE FROM budget_line_items WHERE trim(category) = '' OR category NOT IN (${placeholders})`).run(
+    ...BUDGET_CATEGORY_ORDER
+  )
+  db.prepare(`DELETE FROM budget_items WHERE category NOT IN (${placeholders})`).run(...BUDGET_CATEGORY_ORDER)
+
+  const stamp = now()
+  const insertItem = db.prepare(
+    `INSERT INTO budget_items (category, is_need, amount_standard, amount_with_aid, amount_with_parents, created_at, updated_at)
+     VALUES (?, ?, 0, 0, 0, ?, ?)`
+  )
+  for (const category of BUDGET_CATEGORY_ORDER) {
+    const exists = db.prepare('SELECT 1 FROM budget_items WHERE category = ? LIMIT 1').get(category)
+    if (!exists) {
+      const need = defaultIsNeedForBudgetCategory(category)
+      insertItem.run(category, need ? 1 : 0, stamp, stamp)
+    }
+  }
+
+  for (const category of BUDGET_CATEGORY_ORDER) {
+    syncBudgetItemTotalsForCategory(category)
+  }
+
+  db.prepare(
+    `INSERT INTO app_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+  ).run('money_budget_allowlist_v3', String(stamp))
+}
+
+function runBudgetLineNeedWorkbookMigration(): void {
+  const db = getDb()
+  const flag = db.prepare('SELECT value FROM app_meta WHERE key = ?').get('money_budget_line_need_workbook_v1')
+  if (flag) return
+
+  const rows = db
+    .prepare('SELECT id, category, label, section FROM budget_line_items')
+    .all() as { id: number; category: string; label: string; section: string }[]
+  const stamp = now()
+  const update = db.prepare(`UPDATE budget_line_items SET is_need = ?, updated_at = ? WHERE id = ?`)
+  for (const row of rows) {
+    if (row.section === 'Parental & Gov Help') continue
+    const nextNeed = inferLineIsNeed(row.category, row.label)
+    update.run(nextNeed ? 1 : 0, stamp, row.id)
+  }
+
+  for (const category of BUDGET_CATEGORY_ORDER) {
+    syncBudgetItemTotalsForCategory(category)
+  }
+
+  db.prepare(
+    `INSERT INTO app_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+  ).run('money_budget_line_need_workbook_v1', String(stamp))
 }
 
 function parseAccountType(value: unknown): AccountType {
@@ -937,6 +1023,7 @@ function rowToBudgetLineItem(row: unknown): BudgetLineItem {
     annual_amount: Number(r.annual_amount ?? 0),
     notes: String(r.notes ?? ''),
     support_scope: parseBudgetSupportScope(r.support_scope),
+    is_need: Number(r.is_need ?? 1) === 1,
     created_at: Number(r.created_at ?? 0),
     updated_at: Number(r.updated_at ?? 0)
   }
@@ -1177,22 +1264,32 @@ export function createBudgetLineItem(data: Partial<BudgetLineItem>): BudgetLineI
   const monthly = Math.round(data.monthly_amount ?? 0)
   const sourceSheet = data.source_sheet ?? 'Living Expenses'
   const sourceRow = data.source_row ?? nextBudgetLineSourceRow(sourceSheet)
+  const category = data.category ?? ''
+  const lineIsNeed =
+    data.is_need === true ? 1 : data.is_need === false ? 0 : inferLineIsNeed(category, data.label ?? '') ? 1 : 0
+  const section =
+    data.section && String(data.section).trim() !== ''
+      ? data.section
+      : lineIsNeed
+        ? 'Must-Have Expenses'
+        : 'Nice-to-Have Expenses'
   const result = getDb()
     .prepare(
       `INSERT INTO budget_line_items
-       (source_sheet, source_row, section, label, category, monthly_amount, annual_amount, notes, support_scope, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       (source_sheet, source_row, section, label, category, monthly_amount, annual_amount, notes, support_scope, is_need, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       sourceSheet,
       sourceRow,
-      data.section ?? '',
+      section,
       data.label ?? '',
-      data.category ?? '',
+      category,
       monthly,
       Math.round(data.annual_amount ?? monthly * 12),
       data.notes ?? '',
       parseBudgetSupportScope(data.support_scope),
+      lineIsNeed,
       stamp,
       stamp
     )
@@ -1204,11 +1301,12 @@ export function createBudgetLineItem(data: Partial<BudgetLineItem>): BudgetLineI
 export function updateBudgetLineItem(id: number, data: Partial<BudgetLineItem>): BudgetLineItem {
   const existing = getBudgetLineItemById(id)
   const monthly = Math.round(data.monthly_amount ?? existing.monthly_amount)
+  const nextIsNeed = data.is_need === undefined ? (existing.is_need ? 1 : 0) : data.is_need ? 1 : 0
   getDb()
     .prepare(
       `UPDATE budget_line_items
        SET source_sheet = ?, source_row = ?, section = ?, label = ?, category = ?,
-           monthly_amount = ?, annual_amount = ?, notes = ?, support_scope = ?, updated_at = ?
+           monthly_amount = ?, annual_amount = ?, notes = ?, support_scope = ?, is_need = ?, updated_at = ?
        WHERE id = ?`
     )
     .run(
@@ -1221,6 +1319,7 @@ export function updateBudgetLineItem(id: number, data: Partial<BudgetLineItem>):
       Math.round(data.annual_amount ?? monthly * 12),
       data.notes ?? existing.notes,
       parseBudgetSupportScope(data.support_scope ?? existing.support_scope),
+      nextIsNeed,
       now(),
       id
     )

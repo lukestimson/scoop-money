@@ -13,6 +13,8 @@ import type {
   Transaction,
   TransactionFilters
 } from '../../../types/money'
+import { BUDGET_CATEGORY_ORDER, defaultIsNeedForBudgetCategory } from '../../../types/budgetCategories'
+import { inferLineIsNeed } from '../../../types/budgetNeedRules'
 
 const now = Math.floor(Date.now() / 1000)
 const day = 86400
@@ -29,30 +31,41 @@ const accounts: Account[] = [
   { id: 3, name: 'Venmo', type: 'venmo', institution: 'Venmo', color: '#3b82f6', created_at: now }
 ]
 
-const budgetItems: BudgetItem[] = [
-  budget('Rent', true, 132700),
-  budget('Utilities', true, 13500),
-  budget('Groceries', true, 50000, 23400),
-  budget('Coffee', true, 8400),
-  budget('Phone Bill', true, 5500, 0, 0),
-  budget('Healthcare', true, 35000, 0),
-  budget('Transportation', true, 2500),
-  budget('Subscriptions', true, 15100, 13200, 13200),
-  budget('Dining', false, 32000),
-  budget('Bar/ Alcohol', false, 10000),
-  budget('Travel', false, 14200),
-  budget('Business Expenses', false, 8400),
-  budget('Shopping', false, 9700),
-  budget('Entertainment', false, 4750),
-  budget('AI Fees', false, 1000),
-  budget('Misc', false, 3000)
-]
+const MOCK_CATEGORY_STANDARD: Partial<Record<string, number>> = {
+  Rent: 132700,
+  Utilities: 13500,
+  Groceries: 50000,
+  Coffee: 8400,
+  Transportation: 2500,
+  Subscriptions: 15100,
+  Dining: 32000,
+  'Bar/ Alcohol': 10000,
+  Travel: 14200,
+  'Business Expenses': 8400,
+  Shopping: 9700,
+  Entertainment: 4750,
+  'AI Fees': 1000,
+  Internet: 0,
+  Insurance: 2300,
+  'Gas/Automotive': 0,
+  'Other Services': 1800
+}
+
+const budgetItems: BudgetItem[] = BUDGET_CATEGORY_ORDER.map((category) => {
+  const standard = MOCK_CATEGORY_STANDARD[category] ?? 0
+  const isNeed = defaultIsNeedForBudgetCategory(category)
+  const withAid =
+    category === 'Groceries' ? 23400 : category === 'Subscriptions' ? 13200 : standard
+  const withParents =
+    category === 'Subscriptions' ? 13200 : category === 'Groceries' ? 50000 : standard
+  return budget(category, isNeed, standard, withAid, withParents)
+})
 
 const budgetLineItems: BudgetLineItem[] = [
   line(38, 'Must-Have Expenses', 'Rent or Mortgage', 'Rent', 132700, 'lowest rent for SF 3 person app'),
   line(39, 'Must-Have Expenses', 'Utilities', 'Utilities', 8500, 'Wifi, gas, electric'),
   line(43, 'Must-Have Expenses', 'Food ($212/week)', 'Groceries', 50000, 'Workbook source line'),
-  line(53, 'Subscriptions', 'Spotify Subscription', 'Subscriptions', 1200, 'Parent-supported offset'),
+  line(53, 'Must-Have Expenses', 'Spotify Subscription', 'Subscriptions', 1200, 'Preview line'),
   line(72, 'Nice-to-Have Expenses', 'Going out (Food)', 'Dining', 32000, 'Meals out'),
   line(75, 'Nice-to-Have Expenses', 'New gadgets/ Camera gear', 'Business Expenses', 8400, 'Gear reserve')
 ]
@@ -139,7 +152,22 @@ function budget(category: string, isNeed: boolean, standard: number, withAid = s
 }
 
 function line(row: number, section: string, label: string, category: string, monthly: number, notes: string): BudgetLineItem {
-  return { id: id(), source_sheet: 'Living Expenses', source_row: row, section, label, category, monthly_amount: monthly, annual_amount: monthly * 12, notes, support_scope: 'none', created_at: now, updated_at: now }
+  const isNeed = !section.toLowerCase().includes('nice')
+  return {
+    id: id(),
+    source_sheet: 'Living Expenses',
+    source_row: row,
+    section,
+    label,
+    category,
+    monthly_amount: monthly,
+    annual_amount: monthly * 12,
+    notes,
+    support_scope: 'none',
+    is_need: isNeed,
+    created_at: now,
+    updated_at: now
+  }
 }
 
 function seedMissingPreviewBudgetLines(): void {
@@ -272,17 +300,27 @@ export function installBrowserMockApi(): void {
     createBudgetLineItem: async (data) => {
       const monthly = data.monthly_amount ?? 0
       const maxRow = budgetLineItems.reduce((max, row) => Math.max(max, row.source_row), 0)
+      const category = data.category ?? ''
+      const lineNeed =
+        data.is_need === true ? true : data.is_need === false ? false : inferLineIsNeed(category, data.label ?? '')
+      const section =
+        data.section && data.section.trim() !== ''
+          ? data.section
+          : lineNeed
+            ? 'Must-Have Expenses'
+            : 'Nice-to-Have Expenses'
       const row: BudgetLineItem = {
         id: id(),
         source_sheet: data.source_sheet ?? 'Living Expenses',
         source_row: data.source_row ?? maxRow + 1,
-        section: data.section ?? '',
+        section,
         label: data.label ?? '',
-        category: data.category ?? '',
+        category,
         monthly_amount: monthly,
         annual_amount: data.annual_amount ?? monthly * 12,
         notes: data.notes ?? '',
         support_scope: data.support_scope ?? 'none',
+        is_need: lineNeed,
         created_at: now,
         updated_at: now
       }
