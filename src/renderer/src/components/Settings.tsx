@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { Account, AccountType, AiPromptSettings, BackupFile, BudgetItem, CategoryMappingRule, ModelInfo } from '../../../types/money'
+import { BUDGET_CATEGORY_ALLOWLIST, BUDGET_CATEGORY_ORDER } from '../../../types/budgetCategories'
 import { useAppContext } from '../context/AppContext'
 import { useDateFormat } from '../context/DateFormatContext'
 import { useTheme } from '../context/ThemeContext'
@@ -96,6 +97,14 @@ function BudgetCategoriesSection() {
   const reload = (): void => { window.api.getBudgetItems().then(setItems) }
   useEffect(reload, [])
 
+  const sortedItems = [...items]
+    .filter((item) => BUDGET_CATEGORY_ALLOWLIST.has(item.category))
+    .sort((a, b) => {
+      const ia = (BUDGET_CATEGORY_ORDER as readonly string[]).indexOf(a.category)
+      const ib = (BUDGET_CATEGORY_ORDER as readonly string[]).indexOf(b.category)
+      return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib)
+    })
+
   return (
     <Panel title="Budget Categories">
       <div className="mb-2 grid grid-cols-[1fr_96px_115px_115px_115px_72px] gap-3 px-3 text-[11px] uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400">
@@ -107,7 +116,7 @@ function BudgetCategoriesSection() {
         <span className="text-right">Actions</span>
       </div>
       <div className="space-y-2">
-        {items.map((item) => (
+        {sortedItems.map((item) => (
           <div key={item.id} className="grid grid-cols-[1fr_96px_115px_115px_115px_72px] items-center gap-3 rounded-lg bg-zinc-50 px-3 py-2 text-sm dark:bg-zinc-950">
             <EditablePlain value={item.category} onSave={async (value) => { await window.api.updateBudgetItem(item.id, { category: value }); reload(); bumpDataVersion(); }} />
             <button type="button" onClick={async () => { await window.api.updateBudgetItem(item.id, { is_need: !item.is_need }); reload(); bumpDataVersion(); }} className="rounded-full bg-white px-2.5 py-1 text-[12px] text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200">{item.is_need ? 'Need' : 'Nice'}</button>
@@ -122,7 +131,9 @@ function BudgetCategoriesSection() {
           </div>
         ))}
       </div>
-      <button type="button" onClick={async () => { await window.api.createBudgetItem({ category: 'New Category' }); reload(); bumpDataVersion(); }} className="mt-3 rounded-full bg-zinc-100 px-3 py-1.5 text-[12px] font-medium dark:bg-zinc-800 dark:text-zinc-100">Add category</button>
+      <p className="mt-3 text-[11px] text-zinc-500 dark:text-zinc-400">
+        Categories are fixed to the app&apos;s budget list; edit amounts here or use the Budget page for line items.
+      </p>
     </Panel>
   )
 }

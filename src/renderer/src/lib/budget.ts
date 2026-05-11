@@ -1,10 +1,34 @@
 import type { BudgetItem, BudgetType } from '../../../types/money'
 
 export const BUDGET_TYPE_KEY = 'scoop_money_budget_type'
+export const BUDGET_PERIOD_KEY = 'scoop_money_budget_period'
+export const BUDGET_CATEGORY_SORT_KEY = 'scoop_money_budget_category_sort'
+
+export type BudgetDisplayPeriod = 'week' | 'month' | 'year'
+
+/** How to order rows on the Budget categories table. */
+export type BudgetCategorySortKey = 'sheet' | 'amount_desc' | 'amount_asc' | 'name_asc'
 
 export function getStoredBudgetType(): BudgetType {
   const value = localStorage.getItem(BUDGET_TYPE_KEY)
   return value === 'with_aid' || value === 'with_parents' ? value : 'standard'
+}
+
+export function getStoredBudgetPeriod(): BudgetDisplayPeriod {
+  const value = localStorage.getItem(BUDGET_PERIOD_KEY)
+  return value === 'week' || value === 'year' ? value : 'month'
+}
+
+export function getStoredBudgetCategorySort(): BudgetCategorySortKey {
+  const value = localStorage.getItem(BUDGET_CATEGORY_SORT_KEY)
+  return value === 'amount_desc' || value === 'amount_asc' || value === 'name_asc' ? value : 'sheet'
+}
+
+/** Scale stored monthly cents to week (÷4, rounded), month (1×), or year (×12). */
+export function scaleMonthlyAmountToPeriod(monthlyCents: number, period: BudgetDisplayPeriod): number {
+  if (period === 'week') return Math.round(monthlyCents / 4)
+  if (period === 'year') return monthlyCents * 12
+  return monthlyCents
 }
 
 export function getBudgetAmount(item: BudgetItem, budgetType: BudgetType): number {
