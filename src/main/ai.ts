@@ -1,19 +1,35 @@
 import { existsSync, readFileSync, writeFileSync } from 'fs'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { join } from 'path'
 import Anthropic from '@anthropic-ai/sdk'
 import dotenv from 'dotenv'
-import type { ChatMessage, ChatResult, ModelInfo, SetModelIdResult } from '../types/money'
+import type { AiPromptSettings, ChatAttachment, ChatMessage, ChatResult, ModelInfo, SetModelIdResult } from '../types/money'
 import {
   createIncomeEntry,
+  deleteAppMetaValues,
+  getAppMetaValue,
   getAllBudgetItems,
   getAllIncomeEntries,
-  getAllTransactions
+  getAllTransactions,
+  setAppMetaValue
 } from './database'
 
 dotenv.config()
 
 const DEFAULT_MODEL = 'claude-sonnet-4-5-20250929'
 const MAX_TOOL_ROUNDS = 12
+const execFileAsync = promisify(execFile)
+const AI_PROMPT_META_PREFIX = 'ai_prompt.'
+
+const DEFAULT_AI_PROMPT_SETTINGS: AiPromptSettings = {
+  general_system_prompt:
+    'You are a personal finance assistant for Scoop Money. You have access to the user\'s transaction history, budget settings, income entries, and precomputed monthly/category summaries. Help them understand spending, budget variance, income trends, month-over-month changes, and net cash flow. {accuracy_instruction}\n\n<money_data>{money_data}</money_data>',
+  income_actual_system_prompt:
+    'You are helping log photography income. When the user pastes shoot information, extract: shoot name, company/client name, date, amount, and any notes. Call create_income_entry for each shoot. If multiple shoots are pasted, create multiple entries. Confirm what was created with a brief summary. {accuracy_instruction}\n\n<money_data>{money_data}</money_data>',
+  accuracy_instruction:
+    'Use as few tokens as practical while preserving numeric accuracy. Money values in tool/data payloads are integer cents; compute from cents, then present dollars. For financial analysis, state the period and assumptions used, do not invent missing data, and prefer compact tables or bullets over long prose.'
+}
 
 let cachedClient: Anthropic | null = null
 let currentModel = DEFAULT_MODEL
@@ -68,10 +84,43 @@ export async function setModelId(id: string): Promise<SetModelIdResult> {
   return { success: true }
 }
 
-export async function chatWithMoney(pageId: string, message: string, history: ChatMessage[]): Promise<ChatResult> {
+export function getAiPromptSettings(): AiPromptSettings {
+  return {
+    general_system_prompt: getPromptValue('general_system_prompt'),
+    income_actual_system_prompt: getPromptValue('income_actual_system_prompt'),
+    accuracy_instruction: getPromptValue('accuracy_instruction')
+  }
+}
+
+export function updateAiPromptSettings(data: Partial<AiPromptSettings>): AiPromptSettings {
+  ;(['general_system_prompt', 'income_actual_system_prompt', 'accuracy_instruction'] as const).forEach((key) => {
+    const value = data[key]
+    if (value === undefined) return
+    const normalized = value.replace(/\r\n/g, '\n').trim()
+    if (normalized.length < 20) throw new Error('Prompt sections must be at least 20 characters.')
+    setAppMetaValue(`${AI_PROMPT_META_PREFIX}${key}`, normalized)
+  })
+  return getAiPromptSettings()
+}
+
+export function resetAiPromptSettings(): AiPromptSettings {
+  deleteAppMetaValues(
+    (['general_system_prompt', 'income_actual_system_prompt', 'accuracy_instruction'] as const).map(
+      (key) => `${AI_PROMPT_META_PREFIX}${key}`
+    )
+  )
+  return getAiPromptSettings()
+}
+
+export async function chatWithMoney(
+  pageId: string,
+  message: string,
+  history: ChatMessage[],
+  attachments: ChatAttachment[] = []
+): Promise<ChatResult> {
   const client = getClient()
-  const messages = chatMessagesToTurns(history)
-  messages.push({ role: 'user', content: message })
+  const messages: Anthropic.MessageParam[] = chatMessagesToTurns(history)
+  messages.push({ role: 'user', content: buildUserContent(message, attachments) })
   let dataChanged = false
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
@@ -110,17 +159,29 @@ export async function chatWithMoney(pageId: string, message: string, history: Ch
 
 function getClient(): Anthropic {
   if (cachedClient) return cachedClient
+  tryLoadDotEnv()
   const apiKey = process.env.ANTHROPIC_API_KEY
   if (!hasConfiguredApiKey()) {
-    throw new Error('ANTHROPIC_API_KEY is not configured')
+    throw new Error('ANTHROPIC_API_KEY is not set. Add it to /Users/lukestimson/Documents/scoop-money/.env and restart the app.')
   }
   cachedClient = new Anthropic({ apiKey })
   return cachedClient
 }
 
 function hasConfiguredApiKey(): boolean {
+  tryLoadDotEnv()
   const apiKey = process.env.ANTHROPIC_API_KEY
   return Boolean(apiKey && apiKey !== 'your_key_here')
+}
+
+function tryLoadDotEnv(): void {
+  if (process.env.ANTHROPIC_API_KEY?.trim()) return
+  for (const dir of [process.cwd(), join(process.cwd(), '..')]) {
+    const path = join(dir, '.env')
+    if (!existsSync(path)) continue
+    dotenv.config({ path, override: false })
+    if (process.env.ANTHROPIC_API_KEY?.trim()) return
+  }
 }
 
 function persistModel(): void {
@@ -128,27 +189,164 @@ function persistModel(): void {
   writeFileSync(modelPath, JSON.stringify({ model: currentModel }, null, 2))
 }
 
-function chatMessagesToTurns(history: ChatMessage[]): Array<{ role: 'user' | 'assistant'; content: string }> {
+function chatMessagesToTurns(history: ChatMessage[]): Anthropic.MessageParam[] {
   return history
     .filter((item) => !item.pending && !item.error)
     .map((item) => ({ role: item.role, content: item.content }))
 }
 
+function buildUserContent(message: string, attachments: ChatAttachment[]): string | Anthropic.ContentBlockParam[] {
+  const text = message.trim() || '(attachments only)'
+  if (attachments.length === 0) return text
+
+  const blocks: Anthropic.ContentBlockParam[] = [{ type: 'text', text }]
+  for (const attachment of attachments) {
+    blocks.push({ type: 'text', text: `Attached file: ${attachment.name}` })
+    if (attachment.kind === 'image') {
+      blocks.push({
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: attachment.mediaType as 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp',
+          data: attachment.dataBase64
+        }
+      })
+    } else {
+      blocks.push({
+        type: 'document',
+        source: {
+          type: 'base64',
+          media_type: 'application/pdf',
+          data: attachment.dataBase64
+        }
+      })
+    }
+  }
+  return blocks
+}
+
 function buildSystemPrompt(pageId: string): string {
   const context = JSON.stringify(buildSnapshot())
-  if (pageId === 'income') {
-    return `You are helping log photography income. When the user pastes shoot information, extract: shoot name, company/client name, date, amount, and any notes. Call create_income_entry for each shoot. If multiple shoots are pasted, create multiple entries. Confirm what was created with a brief summary.\n\n<money_data>${context}</money_data>`
+  const settings = getAiPromptSettings()
+  const template = pageId === 'income' || pageId === 'income-actual'
+    ? settings.income_actual_system_prompt
+    : settings.general_system_prompt
+  return renderPrompt(template, settings.accuracy_instruction, context, pageId)
+}
+
+function getPromptValue(key: keyof AiPromptSettings): string {
+  const saved = getAppMetaValue(`${AI_PROMPT_META_PREFIX}${key}`)
+  return saved && saved.trim().length > 0 ? saved : DEFAULT_AI_PROMPT_SETTINGS[key]
+}
+
+function renderPrompt(template: string, accuracyInstruction: string, moneyData: string, pageId: string): string {
+  let rendered = template
+    .replaceAll('{accuracy_instruction}', accuracyInstruction)
+    .replaceAll('{money_data}', moneyData)
+    .replaceAll('{page_id}', pageId)
+  if (!rendered.includes('<money_data>') && !rendered.includes(moneyData)) {
+    rendered += `\n\n<money_data>${moneyData}</money_data>`
   }
-  return `You are a personal finance assistant for Scoop Money. You have access to the user's transaction history, budget settings, and income entries. Help them understand their spending, find savings opportunities, and answer questions about their finances. Be concise and specific with dollar amounts.\n\n<money_data>${context}</money_data>`
+  return rendered
 }
 
 function buildSnapshot(): unknown {
-  const transactions = getAllTransactions().slice(0, 250)
+  const transactions = getAllTransactions()
   const budget = getAllBudgetItems()
-  const income = getAllIncomeEntries().slice(0, 150)
-  const totalSpent = transactions.filter((tx) => tx.amount > 0).reduce((sum, tx) => sum + tx.amount, 0)
+  const income = getAllIncomeEntries()
+  const recentTransactions = transactions.slice(0, 180).map((tx) => ({
+    date: tx.date,
+    description: tx.description,
+    amount: tx.amount,
+    category: tx.mapped_category,
+    source: tx.source
+  }))
+  const recentIncome = income.slice(0, 120).map((entry) => ({
+    date: entry.date,
+    shoot: entry.shoot_name,
+    company: entry.company,
+    amount: entry.amount
+  }))
+  const totalExpenseNet = transactions.reduce((sum, tx) => sum + tx.amount, 0)
+  const totalExpenseOutflows = transactions.filter((tx) => tx.amount > 0).reduce((sum, tx) => sum + tx.amount, 0)
   const totalIncome = income.reduce((sum, entry) => sum + entry.amount, 0)
-  return { totals: { totalSpent, totalIncome }, transactions, budget, income }
+  return {
+    units: 'integer cents',
+    totals: { totalExpenseNet, totalExpenseOutflows, totalIncome, netAfterExpenses: totalIncome - totalExpenseNet },
+    monthly: buildMonthlySummary(transactions, income),
+    budget: budget.map((item) => ({
+      category: item.category,
+      isNeed: item.is_need,
+      standard: item.amount_standard,
+      withParents: item.amount_with_parents,
+      withAid: item.amount_with_aid
+    })),
+    recentTransactions,
+    recentIncome
+  }
+}
+
+function buildMonthlySummary(transactions: ReturnType<typeof getAllTransactions>, income: ReturnType<typeof getAllIncomeEntries>): unknown[] {
+  const months = new Map<
+    string,
+    {
+      month: string
+      expenseNet: number
+      expenseOutflows: number
+      reimbursements: number
+      income: number
+      netAfterExpenses: number
+      categories: Map<string, number>
+    }
+  >()
+  const ensure = (key: string) => {
+    let row = months.get(key)
+    if (!row) {
+      row = {
+        month: key,
+        expenseNet: 0,
+        expenseOutflows: 0,
+        reimbursements: 0,
+        income: 0,
+        netAfterExpenses: 0,
+        categories: new Map<string, number>()
+      }
+      months.set(key, row)
+    }
+    return row
+  }
+
+  transactions.forEach((tx) => {
+    const row = ensure(monthKey(tx.date))
+    row.expenseNet += tx.amount
+    if (tx.amount > 0) row.expenseOutflows += tx.amount
+    if (tx.amount < 0) row.reimbursements += Math.abs(tx.amount)
+    row.categories.set(tx.mapped_category, (row.categories.get(tx.mapped_category) ?? 0) + tx.amount)
+  })
+  income.forEach((entry) => {
+    const row = ensure(monthKey(entry.date))
+    row.income += entry.amount
+  })
+
+  return Array.from(months.values())
+    .map((row) => ({
+      month: row.month,
+      expenseNet: row.expenseNet,
+      expenseOutflows: row.expenseOutflows,
+      reimbursements: row.reimbursements,
+      income: row.income,
+      netAfterExpenses: row.income - row.expenseNet,
+      categories: Array.from(row.categories.entries())
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([category, amount]) => ({ category, amount }))
+    }))
+    .sort((a, b) => b.month.localeCompare(a.month))
+    .slice(0, 18)
+}
+
+function monthKey(timestamp: number): string {
+  const date = new Date(timestamp * 1000)
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
 }
 
 function executeTool(name: string, input: unknown): unknown {
@@ -236,3 +434,32 @@ const TOOLS = [
     }
   }
 ] as Anthropic.Tool[]
+
+export async function startMacDictation(): Promise<void> {
+  if (process.platform !== 'darwin') {
+    throw new Error('Mac Dictation is only available on macOS.')
+  }
+
+  const script = `
+    tell application "System Events"
+      tell (first application process whose frontmost is true)
+        set editMenu to menu 1 of menu bar item "Edit" of menu bar 1
+        set dictItem to first menu item of editMenu whose name starts with "Start Dictation"
+        click dictItem
+      end tell
+    end tell
+  `.trim()
+
+  try {
+    await execFileAsync('osascript', ['-e', script], { timeout: 4000 })
+  } catch (error) {
+    const raw = error instanceof Error ? error.message : String(error)
+    if (raw.includes('-1743') || raw.toLowerCase().includes('not authorized')) {
+      throw new Error('Grant Automation access: System Settings > Privacy & Security > Automation > Scoop Money > System Events.')
+    }
+    if (raw.includes('Can’t get menu') || raw.includes("Can't get menu") || raw.includes('-1728')) {
+      throw new Error('Start Dictation not found in the Edit menu. Enable it in System Settings > Keyboard > Dictation.')
+    }
+    throw new Error('Could not start Mac Dictation. Press Fn Fn manually.')
+  }
+}

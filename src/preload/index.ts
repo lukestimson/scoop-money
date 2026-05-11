@@ -1,18 +1,35 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 import type { BudgetType, ChatMessage, MoneyAPI, TransactionFilters } from '../types/money'
 
 const api: MoneyAPI = {
+  onTextScaleCommand: (callback): (() => void) => {
+    const listener = (_event: unknown, command: { kind: 'delta'; delta: number } | { kind: 'reset' }): void => {
+      callback(command)
+    }
+    ipcRenderer.on('ui:textScaleCommand', listener)
+    return (): void => {
+      ipcRenderer.removeListener('ui:textScaleCommand', listener)
+    }
+  },
   getTransactions: (filters?: TransactionFilters) => ipcRenderer.invoke('transactions:getAll', filters),
   createTransaction: (data) => ipcRenderer.invoke('transactions:create', data),
   updateTransaction: (id, data) => ipcRenderer.invoke('transactions:update', id, data),
   deleteTransaction: (id) => ipcRenderer.invoke('transactions:delete', id),
+  deleteTransactions: (ids) => ipcRenderer.invoke('transactions:deleteMany', ids),
+  deleteAllTransactions: () => ipcRenderer.invoke('transactions:deleteAll'),
   importTransactions: (filePath, accountId) => ipcRenderer.invoke('transactions:import', filePath, accountId),
+  getImportedFiles: (filters) => ipcRenderer.invoke('imports:getAll', filters),
+  getPathForFile: (file) => webUtils.getPathForFile(file),
 
   getBudgetItems: (budgetType?: BudgetType) => ipcRenderer.invoke('budget:getAll', budgetType),
+  getBudgetLineItems: () => ipcRenderer.invoke('budgetLines:getAll'),
   createBudgetItem: (data) => ipcRenderer.invoke('budget:create', data),
   updateBudgetItem: (id, data) => ipcRenderer.invoke('budget:update', id, data),
   deleteBudgetItem: (id) => ipcRenderer.invoke('budget:delete', id),
+  createBudgetLineItem: (data) => ipcRenderer.invoke('budgetLines:create', data),
+  updateBudgetLineItem: (id, data) => ipcRenderer.invoke('budgetLines:update', id, data),
+  deleteBudgetLineItem: (id) => ipcRenderer.invoke('budgetLines:delete', id),
 
   getAccounts: () => ipcRenderer.invoke('accounts:getAll'),
   createAccount: (data) => ipcRenderer.invoke('accounts:create', data),
@@ -23,6 +40,12 @@ const api: MoneyAPI = {
   createIncomeEntry: (data) => ipcRenderer.invoke('income:create', data),
   updateIncomeEntry: (id, data) => ipcRenderer.invoke('income:update', id, data),
   deleteIncomeEntry: (id) => ipcRenderer.invoke('income:delete', id),
+  getExpectedIncomeEntries: () => ipcRenderer.invoke('incomeExpected:getAll'),
+  createExpectedIncomeEntry: (data) => ipcRenderer.invoke('incomeExpected:create', data),
+  updateExpectedIncomeEntry: (id, data) => ipcRenderer.invoke('incomeExpected:update', id, data),
+  deleteExpectedIncomeEntry: (id) => ipcRenderer.invoke('incomeExpected:delete', id),
+  getIncomeTaxSettings: () => ipcRenderer.invoke('incomeTax:getSettings'),
+  updateIncomeTaxSettings: (data) => ipcRenderer.invoke('incomeTax:updateSettings', data),
 
   getCategoryRules: () => ipcRenderer.invoke('rules:getAll'),
   createCategoryRule: (data) => ipcRenderer.invoke('rules:create', data),
@@ -30,14 +53,21 @@ const api: MoneyAPI = {
   deleteCategoryRule: (id) => ipcRenderer.invoke('rules:delete', id),
   recategorizeAllTransactions: () => ipcRenderer.invoke('rules:recategorizeAll'),
 
-  chat: (pageId: string, message: string, history: ChatMessage[]) =>
-    ipcRenderer.invoke('ai:chat', pageId, message, history),
+  chat: (pageId: string, message: string, history: ChatMessage[], attachments = []) =>
+    ipcRenderer.invoke('ai:chat', pageId, message, history, attachments),
   getModel: () => ipcRenderer.invoke('ai:getModel'),
   getAvailableModels: () => ipcRenderer.invoke('ai:getAvailableModels'),
   setModel: (id) => ipcRenderer.invoke('ai:setModel', id),
+  startMacDictation: () => ipcRenderer.invoke('ai:startMacDictation'),
+  getAiPromptSettings: () => ipcRenderer.invoke('aiPrompts:get'),
+  updateAiPromptSettings: (data) => ipcRenderer.invoke('aiPrompts:update', data),
+  resetAiPromptSettings: () => ipcRenderer.invoke('aiPrompts:reset'),
 
   backupNow: () => ipcRenderer.invoke('backup:now'),
-  getBackupList: () => ipcRenderer.invoke('backup:list')
+  getBackupList: () => ipcRenderer.invoke('backup:list'),
+  getBackupRetention: () => ipcRenderer.invoke('backup:getRetention'),
+  setBackupRetention: (maxFiles) => ipcRenderer.invoke('backup:setRetention', maxFiles),
+  openBackupFolder: () => ipcRenderer.invoke('backup:openFolder')
 }
 
 if (process.contextIsolated) {

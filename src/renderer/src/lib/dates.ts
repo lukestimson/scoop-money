@@ -34,7 +34,7 @@ export function getPeriodBounds(unit: PeriodUnit, date: Date): { start: number; 
 export function groupTransactionsByPeriod(transactions: Transaction[], unit: PeriodUnit): PeriodGroup[] {
   const groups = new Map<string, PeriodGroup>()
   transactions
-    .filter((tx) => tx.amount > 0)
+    .filter((tx) => tx.amount !== 0)
     .forEach((tx) => {
       const date = new Date(tx.date * 1000)
       const bounds = getPeriodBounds(unit, date)

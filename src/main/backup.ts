@@ -1,17 +1,21 @@
-import { mkdirSync, readdirSync, statSync, unlinkSync } from 'fs'
+import { mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'fs'
 import { basename, join } from 'path'
 import type { BackupFile } from '../types/money'
 import { backupDatabase } from './database'
 
 const BACKUP_PATTERN = /^backup-.*\.db$/
 const DEFAULT_RETENTION = 7
+const MIN_RETENTION = 1
+const MAX_RETENTION = 50
 
 let backupDir = ''
+let settingsPath = ''
 let noonTimer: NodeJS.Timeout | null = null
 let eveningTimer: NodeJS.Timeout | null = null
 
 export function initBackups(userDataPath: string): void {
   backupDir = join(userDataPath, 'backups')
+  settingsPath = join(userDataPath, 'backup-settings.json')
   mkdirSync(backupDir, { recursive: true })
   scheduleBackupTimers()
 }
@@ -43,6 +47,29 @@ export function listBackups(): BackupFile[] {
     .sort((a, b) => b.createdAt - a.createdAt)
 }
 
+export function getBackupRetention(): number {
+  if (!settingsPath) return DEFAULT_RETENTION
+  try {
+    const parsed = JSON.parse(readFileSync(settingsPath, 'utf8')) as { maxBackups?: unknown }
+    return clampRetention(Number(parsed.maxBackups))
+  } catch {
+    return DEFAULT_RETENTION
+  }
+}
+
+export function setBackupRetention(maxFiles: number): number {
+  const next = clampRetention(maxFiles)
+  if (settingsPath) writeFileSync(settingsPath, JSON.stringify({ maxBackups: next }, null, 2), 'utf8')
+  pruneBackups()
+  return next
+}
+
+export function getBackupDirectory(): string {
+  if (!backupDir) throw new Error('Backups have not been initialized')
+  mkdirSync(backupDir, { recursive: true })
+  return backupDir
+}
+
 export function scheduleBackupTimers(): void {
   if (noonTimer) clearTimeout(noonTimer)
   if (eveningTimer) clearTimeout(eveningTimer)
@@ -65,12 +92,17 @@ function scheduleDailyAt(hour: number, minute: number): NodeJS.Timeout {
 
 function pruneBackups(): void {
   listBackups()
-    .slice(DEFAULT_RETENTION)
+    .slice(getBackupRetention())
     .forEach((backup) => {
       if (BACKUP_PATTERN.test(basename(backup.path))) unlinkSync(backup.path)
     })
 }
 
+function clampRetention(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_RETENTION
+  return Math.min(MAX_RETENTION, Math.max(MIN_RETENTION, Math.round(value)))
+}
+
 function backupFileStamp(): string {
-  return `backup-${new Date().toISOString().replace(/[:.]/g, '-')}`
+  return `backup-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}`
 }

@@ -13,6 +13,7 @@
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "start": "node ./scripts/run-electron-vite.mjs preview",
     "dev": "node ./scripts/run-electron-vite.mjs dev",
+    "dev:web": "vite --config vite.web.config.ts --host 127.0.0.1 --port 5175",
     "build": "npm run typecheck && electron-vite build",
     "rebuild": "electron-rebuild -f -w better-sqlite3",
     "postinstall": "electron-builder install-app-deps && electron-rebuild -f -w better-sqlite3",
