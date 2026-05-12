@@ -6,13 +6,17 @@ import Anthropic from '@anthropic-ai/sdk'
 import dotenv from 'dotenv'
 import type { AiPromptSettings, ChatAttachment, ChatMessage, ChatResult, ModelInfo, SetModelIdResult } from '../types/money'
 import {
+  createBudgetLineItem,
   createIncomeEntry,
   deleteAppMetaValues,
+  deleteBudgetLineItem,
   getAppMetaValue,
   getAllBudgetItems,
+  getAllBudgetLineItems,
   getAllIncomeEntries,
   getAllTransactions,
-  setAppMetaValue
+  setAppMetaValue,
+  updateBudgetLineItem
 } from './database'
 
 dotenv.config()
@@ -144,7 +148,14 @@ export async function chatWithMoney(
 
     const toolResults = toolBlocks.map((block) => {
       const result = executeTool(block.name, block.input)
-      if (block.name === 'create_income_entry') dataChanged = true
+      if (
+        block.name === 'create_income_entry' ||
+        block.name === 'create_budget_line_item' ||
+        block.name === 'update_budget_line_item' ||
+        block.name === 'delete_budget_line_item'
+      ) {
+        dataChanged = true
+      }
       return {
         type: 'tool_result',
         tool_use_id: block.id,
@@ -231,7 +242,12 @@ function buildSystemPrompt(pageId: string): string {
   const template = pageId === 'income' || pageId === 'income-actual'
     ? settings.income_actual_system_prompt
     : settings.general_system_prompt
-  return renderPrompt(template, settings.accuracy_instruction, context, pageId)
+  let rendered = renderPrompt(template, settings.accuracy_instruction, context, pageId)
+  if (pageId === 'expenses-budget') {
+    rendered +=
+      '\n\nYou are on the Budget page. money_data includes budgetLineItems (id, category, label, monthly_cents, is_need). To edit lines, use create_budget_line_item, update_budget_line_item, or delete_budget_line_item. category must match a canonical name from budget[].category. Pass monthly amounts in dollars unless the value is clearly integer cents.'
+  }
+  return rendered
 }
 
 function getPromptValue(key: keyof AiPromptSettings): string {
@@ -270,6 +286,15 @@ function buildSnapshot(): unknown {
   const totalExpenseNet = transactions.reduce((sum, tx) => sum + tx.amount, 0)
   const totalExpenseOutflows = transactions.filter((tx) => tx.amount > 0).reduce((sum, tx) => sum + tx.amount, 0)
   const totalIncome = income.reduce((sum, entry) => sum + entry.amount, 0)
+  const budgetLines = getAllBudgetLineItems().slice(0, 160).map((line) => ({
+    id: line.id,
+    category: line.category,
+    label: line.label,
+    monthly_cents: line.monthly_amount,
+    is_need: line.is_need,
+    support_scope: line.support_scope,
+    section: line.section
+  }))
   return {
     units: 'integer cents',
     totals: { totalExpenseNet, totalExpenseOutflows, totalIncome, netAfterExpenses: totalIncome - totalExpenseNet },
@@ -281,6 +306,7 @@ function buildSnapshot(): unknown {
       withParents: item.amount_with_parents,
       withAid: item.amount_with_aid
     })),
+    budgetLineItems: budgetLines,
     recentTransactions,
     recentIncome
   }
@@ -379,6 +405,36 @@ function executeTool(name: string, input: unknown): unknown {
       spent: spentByCategory.get(item.category) ?? 0
     }))
   }
+  if (name === 'create_budget_line_item') {
+    const row = createBudgetLineItem({
+      category: String(data.category ?? ''),
+      label: String(data.label ?? ''),
+      monthly_amount: normalizeAmount(data.monthly_amount),
+      is_need: data.is_need === false ? false : data.is_need === true ? true : undefined,
+      section: ''
+    })
+    return { success: true, id: row.id, category: row.category, label: row.label, monthly_cents: row.monthly_amount }
+  }
+  if (name === 'update_budget_line_item') {
+    const id = Number(data.id)
+    if (!Number.isFinite(id)) return { error: 'id must be a number' }
+    const patch: Parameters<typeof updateBudgetLineItem>[1] = {}
+    if (data.label !== undefined) patch.label = String(data.label)
+    if (data.monthly_amount !== undefined) patch.monthly_amount = normalizeAmount(data.monthly_amount)
+    if (data.is_need === true || data.is_need === false) {
+      patch.is_need = Boolean(data.is_need)
+      patch.section = patch.is_need ? 'Needs' : 'Wants'
+    }
+    if (data.category !== undefined) patch.category = String(data.category)
+    const row = updateBudgetLineItem(id, patch)
+    return { success: true, id: row.id, category: row.category, label: row.label, monthly_cents: row.monthly_amount, is_need: row.is_need }
+  }
+  if (name === 'delete_budget_line_item') {
+    const id = Number(data.id)
+    if (!Number.isFinite(id)) return { error: 'id must be a number' }
+    deleteBudgetLineItem(id)
+    return { success: true, id }
+  }
   return { error: `Unknown tool: ${name}` }
 }
 
@@ -431,6 +487,46 @@ const TOOLS = [
       properties: {
         month: { type: 'string' }
       }
+    }
+  },
+  {
+    name: 'create_budget_line_item',
+    description: 'Create a budget line item in a category. Amounts are dollars unless clearly large integer cents.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        category: { type: 'string', description: 'Canonical budget category name' },
+        label: { type: 'string' },
+        monthly_amount: { type: ['string', 'number'], description: 'Monthly budget in dollars (e.g. 120.50) or cents if > 1000' },
+        is_need: { type: 'boolean', description: 'true for needs, false for wants' }
+      },
+      required: ['category', 'monthly_amount']
+    }
+  },
+  {
+    name: 'update_budget_line_item',
+    description: 'Update an existing budget line by id (see budgetLineItems in snapshot).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'number' },
+        label: { type: 'string' },
+        monthly_amount: { type: ['string', 'number'] },
+        is_need: { type: 'boolean' },
+        category: { type: 'string' }
+      },
+      required: ['id']
+    }
+  },
+  {
+    name: 'delete_budget_line_item',
+    description: 'Delete a budget line item by id.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'number' }
+      },
+      required: ['id']
     }
   }
 ] as Anthropic.Tool[]

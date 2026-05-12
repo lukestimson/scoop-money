@@ -182,7 +182,7 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
   {
     source_sheet: 'Living Expenses',
     source_row: 38,
-    section: 'Must-Have Expenses',
+    section: 'Needs',
     label: 'Rent or Mortgage',
     category: 'Rent',
     monthly: 1327,
@@ -192,7 +192,7 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
   {
     source_sheet: 'Living Expenses',
     source_row: 39,
-    section: 'Must-Have Expenses',
+    section: 'Needs',
     label: 'Utilities',
     category: 'Utilities',
     monthly: 85,
@@ -202,7 +202,7 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
   {
     source_sheet: 'Living Expenses',
     source_row: 40,
-    section: 'Must-Have Expenses',
+    section: 'Needs',
     label: 'Monthly cleaning',
     category: 'Utilities',
     monthly: 50,
@@ -212,7 +212,7 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
   {
     source_sheet: 'Living Expenses',
     source_row: 41,
-    section: 'Must-Have Expenses',
+    section: 'Needs',
     label: 'Renters Insurance',
     category: 'Rent',
     monthly: 0,
@@ -222,7 +222,7 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
   {
     source_sheet: 'Living Expenses',
     source_row: 43,
-    section: 'Must-Have Expenses',
+    section: 'Needs',
     label: 'Food ($212/week)',
     category: 'Groceries',
     monthly: 500,
@@ -232,7 +232,7 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
   {
     source_sheet: 'Living Expenses',
     source_row: 44,
-    section: 'Must-Have Expenses',
+    section: 'Needs',
     label: 'Coffee/ Yerbs',
     category: 'Coffee',
     monthly: 84,
@@ -242,7 +242,7 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
   {
     source_sheet: 'Living Expenses',
     source_row: 45,
-    section: 'Must-Have Expenses',
+    section: 'Needs',
     label: 'Phone Bill',
     category: 'Utilities',
     monthly: 55,
@@ -252,7 +252,7 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
   {
     source_sheet: 'Living Expenses',
     source_row: 46,
-    section: 'Must-Have Expenses',
+    section: 'Needs',
     label: 'Healthcare',
     category: 'Insurance',
     monthly: 350,
@@ -262,7 +262,7 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
   {
     source_sheet: 'Living Expenses',
     source_row: 47,
-    section: 'Must-Have Expenses',
+    section: 'Needs',
     label: 'Haircuts',
     category: 'Other Services',
     monthly: 18,
@@ -272,7 +272,7 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
   {
     source_sheet: 'Living Expenses',
     source_row: 48,
-    section: 'Must-Have Expenses',
+    section: 'Needs',
     label: 'Cleaning Supplies, Cooking Supplies, household stuff',
     category: 'Shopping',
     monthly: 9,
@@ -282,7 +282,7 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
   {
     source_sheet: 'Living Expenses',
     source_row: 49,
-    section: 'Must-Have Expenses',
+    section: 'Needs',
     label: 'Toiletries, Deodorant, tooth paste, razors, shaving creme, moisterizer',
     category: 'Shopping',
     monthly: 6,
@@ -292,7 +292,7 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
   {
     source_sheet: 'Living Expenses',
     source_row: 50,
-    section: 'Must-Have Expenses',
+    section: 'Needs',
     label: 'Transportation',
     category: 'Transportation',
     monthly: 25,
@@ -422,7 +422,7 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
   {
     source_sheet: 'Living Expenses',
     source_row: 72,
-    section: 'Nice-to-Have Expenses',
+    section: 'Wants',
     label: 'Going out (Food)',
     category: 'Dining',
     monthly: 320,
@@ -432,7 +432,7 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
   {
     source_sheet: 'Living Expenses',
     source_row: 73,
-    section: 'Nice-to-Have Expenses',
+    section: 'Wants',
     label: 'Going out (Drinks)',
     category: 'Bar/ Alcohol',
     monthly: 100,
@@ -442,7 +442,7 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
   {
     source_sheet: 'Living Expenses',
     source_row: 74,
-    section: 'Nice-to-Have Expenses',
+    section: 'Wants',
     label: 'Travel',
     category: 'Travel',
     monthly: 142,
@@ -452,7 +452,7 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
   {
     source_sheet: 'Living Expenses',
     source_row: 75,
-    section: 'Nice-to-Have Expenses',
+    section: 'Wants',
     label: 'New gadgets/ Camera gear',
     category: 'Business Expenses',
     monthly: 84,
@@ -462,7 +462,7 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
   {
     source_sheet: 'Living Expenses',
     source_row: 76,
-    section: 'Nice-to-Have Expenses',
+    section: 'Wants',
     label: 'Film Photography (Film+ Developing+new gear)',
     category: 'Shopping',
     monthly: 42,
@@ -472,7 +472,7 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
   {
     source_sheet: 'Living Expenses',
     source_row: 77,
-    section: 'Nice-to-Have Expenses',
+    section: 'Wants',
     label: 'Zyns',
     category: 'Shopping',
     monthly: 17,
@@ -482,7 +482,7 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
   {
     source_sheet: 'Living Expenses',
     source_row: 78,
-    section: 'Nice-to-Have Expenses',
+    section: 'Wants',
     label: 'New Clothing',
     category: 'Shopping',
     monthly: 23,
@@ -492,7 +492,7 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
   {
     source_sheet: 'Living Expenses',
     source_row: 79,
-    section: 'Nice-to-Have Expenses',
+    section: 'Wants',
     label: 'Weekly Movies (Tuesday Deals)',
     category: 'Entertainment',
     monthly: 30,
@@ -502,7 +502,7 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
   {
     source_sheet: 'Living Expenses',
     source_row: 80,
-    section: 'Nice-to-Have Expenses',
+    section: 'Wants',
     label: 'Concerts',
     category: 'Entertainment',
     monthly: 17.5,
@@ -512,7 +512,7 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
   {
     source_sheet: 'Living Expenses',
     source_row: 81,
-    section: 'Nice-to-Have Expenses',
+    section: 'Wants',
     label: 'AI Fees',
     category: 'AI Fees',
     monthly: 10,
@@ -522,7 +522,7 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
   {
     source_sheet: 'Living Expenses',
     source_row: 82,
-    section: 'Nice-to-Have Expenses',
+    section: 'Wants',
     label: 'Miscillaneous purchases',
     category: 'Other Services',
     monthly: 30,
@@ -655,6 +655,7 @@ export function initDatabase(userDataPath: string): void {
   seedDefaults()
   runMoneyBudgetAllowlistMigration()
   runBudgetLineNeedWorkbookMigration()
+  runBudgetSectionNeedsWantsLabelsMigration()
 }
 
 export function getDatabasePath(): string {
@@ -808,7 +809,8 @@ function runWorkbookBudgetMigration(): void {
   })
   WORKBOOK_BUDGET_LINES.forEach((item) => {
     const monthly = cents(item.monthly)
-    const lineIsNeed = item.section.toLowerCase().includes('nice') ? 0 : 1
+    const sec = item.section.toLowerCase()
+    const lineIsNeed = sec.includes('wants') || sec.includes('nice') ? 0 : 1
     upsertLine.run(
       item.source_sheet,
       item.source_row,
@@ -840,7 +842,7 @@ function ensureBudgetLineItemsHasIsNeedColumn(): void {
   const db = getDb()
   if (budgetLineItemsHasIsNeedColumn(db)) return
   db.exec('ALTER TABLE budget_line_items ADD COLUMN is_need INTEGER NOT NULL DEFAULT 1')
-  db.prepare(`UPDATE budget_line_items SET is_need = 0 WHERE lower(section) LIKE '%nice%'`).run()
+  db.prepare(`UPDATE budget_line_items SET is_need = 0 WHERE lower(section) LIKE '%wants%' OR lower(section) LIKE '%nice%'`).run()
   db.prepare(
     `UPDATE budget_line_items SET is_need = (
        SELECT CASE WHEN bi.is_need THEN 1 ELSE 0 END FROM budget_items bi WHERE bi.category = budget_line_items.category LIMIT 1
@@ -910,6 +912,20 @@ function runBudgetLineNeedWorkbookMigration(): void {
   db.prepare(
     `INSERT INTO app_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`
   ).run('money_budget_line_need_workbook_v1', String(stamp))
+}
+
+function runBudgetSectionNeedsWantsLabelsMigration(): void {
+  const db = getDb()
+  const flag = db.prepare('SELECT value FROM app_meta WHERE key = ?').get('money_budget_section_needs_wants_v1')
+  if (flag) return
+  db.prepare(`UPDATE budget_line_items SET section = 'Wants' WHERE lower(section) LIKE '%nice%'`).run()
+  db.prepare(
+    `UPDATE budget_line_items SET section = 'Needs' WHERE lower(section) LIKE '%must-have%' OR section = 'Must-Have Expenses'`
+  ).run()
+  const stamp = now()
+  db.prepare(
+    `INSERT INTO app_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+  ).run('money_budget_section_needs_wants_v1', String(stamp))
 }
 
 function parseAccountType(value: unknown): AccountType {
@@ -1271,8 +1287,8 @@ export function createBudgetLineItem(data: Partial<BudgetLineItem>): BudgetLineI
     data.section && String(data.section).trim() !== ''
       ? data.section
       : lineIsNeed
-        ? 'Must-Have Expenses'
-        : 'Nice-to-Have Expenses'
+        ? 'Needs'
+        : 'Wants'
   const result = getDb()
     .prepare(
       `INSERT INTO budget_line_items

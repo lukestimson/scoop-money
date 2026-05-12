@@ -62,12 +62,12 @@ const budgetItems: BudgetItem[] = BUDGET_CATEGORY_ORDER.map((category) => {
 })
 
 const budgetLineItems: BudgetLineItem[] = [
-  line(38, 'Must-Have Expenses', 'Rent or Mortgage', 'Rent', 132700, 'lowest rent for SF 3 person app'),
-  line(39, 'Must-Have Expenses', 'Utilities', 'Utilities', 8500, 'Wifi, gas, electric'),
-  line(43, 'Must-Have Expenses', 'Food ($212/week)', 'Groceries', 50000, 'Workbook source line'),
-  line(53, 'Must-Have Expenses', 'Spotify Subscription', 'Subscriptions', 1200, 'Preview line'),
-  line(72, 'Nice-to-Have Expenses', 'Going out (Food)', 'Dining', 32000, 'Meals out'),
-  line(75, 'Nice-to-Have Expenses', 'New gadgets/ Camera gear', 'Business Expenses', 8400, 'Gear reserve')
+  line(38, 'Needs', 'Rent or Mortgage', 'Rent', 132700, 'lowest rent for SF 3 person app'),
+  line(39, 'Needs', 'Utilities', 'Utilities', 8500, 'Wifi, gas, electric'),
+  line(43, 'Needs', 'Food ($212/week)', 'Groceries', 50000, 'Workbook source line'),
+  line(53, 'Needs', 'Spotify Subscription', 'Subscriptions', 1200, 'Preview line'),
+  line(72, 'Wants', 'Going out (Food)', 'Dining', 32000, 'Meals out'),
+  line(75, 'Wants', 'New gadgets/ Camera gear', 'Business Expenses', 8400, 'Gear reserve')
 ]
 
 let transactions: Transaction[] = [
@@ -152,7 +152,7 @@ function budget(category: string, isNeed: boolean, standard: number, withAid = s
 }
 
 function line(row: number, section: string, label: string, category: string, monthly: number, notes: string): BudgetLineItem {
-  const isNeed = !section.toLowerCase().includes('nice')
+  const isNeed = !/wants|nice/i.test(section)
   return {
     id: id(),
     source_sheet: 'Living Expenses',
@@ -181,7 +181,7 @@ function seedMissingPreviewBudgetLines(): void {
     budgetLineItems.push(
       line(
         nextSourceRow,
-        item.is_need ? 'Must-Have Expenses' : 'Nice-to-Have Expenses',
+        item.is_need ? 'Needs' : 'Wants',
         existingTotal === 0 ? item.category : `${item.category} adjustment`,
         item.category,
         missingAmount,
@@ -307,8 +307,8 @@ export function installBrowserMockApi(): void {
         data.section && data.section.trim() !== ''
           ? data.section
           : lineNeed
-            ? 'Must-Have Expenses'
-            : 'Nice-to-Have Expenses'
+            ? 'Needs'
+            : 'Wants'
       const row: BudgetLineItem = {
         id: id(),
         source_sheet: data.source_sheet ?? 'Living Expenses',

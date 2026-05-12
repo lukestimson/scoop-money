@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
+  Area,
   CartesianGrid,
   ComposedChart,
   Line,
@@ -9,6 +10,7 @@ import {
   XAxis,
   YAxis
 } from 'recharts'
+import type { TooltipContentProps } from 'recharts'
 import type { BudgetItem, IncomeEntry, Transaction } from '../../../types/money'
 import { useAppContext } from '../context/AppContext'
 import { useChat } from '../context/ChatContext'
@@ -18,6 +20,15 @@ import { getBudgetAmount, getStoredBudgetType } from '../lib/budget'
 import { ChatBox } from './ChatBox'
 
 const UNIT_KEY = 'scoop_money_chart_unit'
+
+type ChartPoint = {
+  label: string
+  spent: number
+  budget: number
+  overFill: number
+  underFill: number
+  amount: number
+}
 
 export function Dashboard() {
   const { dataVersion } = useAppContext()
@@ -56,18 +67,24 @@ export function Dashboard() {
     .reduce((sum, entry) => sum + entry.amount, 0)
   const monthlyBudget = budgetItems.reduce((sum, item) => sum + getBudgetAmount(item, getStoredBudgetType()), 0)
 
-  const chartData = useMemo(() => {
+  const chartData = useMemo<ChartPoint[]>(() => {
     const grouped = groupTransactionsByPeriod(transactions, unit)
     const budgetLevel = getPeriodBudget(monthlyBudget, unit)
+    const budget = budgetLevel / 100
     if (grouped.length === 0) {
-      return [{ label: 'No data', actual: 0, budget: budgetLevel / 100 }]
+      return [{ label: 'No data', spent: 0, budget, overFill: budget, underFill: budget, amount: 0 }]
     }
-    return grouped.map((group) => ({
-      label: group.label,
-      actual: group.amount / 100,
-      budget: budgetLevel / 100,
-      amount: group.amount
-    }))
+    return grouped.map((group) => {
+      const spent = group.amount / 100
+      return {
+        label: group.label,
+        spent,
+        budget,
+        overFill: Math.max(spent, budget),
+        underFill: Math.min(spent, budget),
+        amount: group.amount
+      }
+    })
   }, [monthlyBudget, transactions, unit])
   const chat = getChat('dashboard')
   const fadeHeight = chatExpanded ? Math.min(chat.height + 128, 680) : 96
@@ -110,13 +127,23 @@ export function Dashboard() {
           <div className="h-[320px]">
             <ResponsiveContainer width="100%" height="100%">
               <ComposedChart data={chartData} margin={{ left: 12, right: 20, top: 10, bottom: 0 }}>
+                <defs>
+                  <pattern id="dashboard-over-budget" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+                    <line x1="0" y1="0" x2="0" y2="8" stroke="#ef4444" strokeWidth="2" opacity="0.45" />
+                  </pattern>
+                  <pattern id="dashboard-under-budget" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+                    <line x1="0" y1="0" x2="0" y2="8" stroke="#16a34a" strokeWidth="2" opacity="0.42" />
+                  </pattern>
+                </defs>
                 <CartesianGrid stroke="#e4e4e7" vertical={false} />
                 <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#71717a' }} />
                 <YAxis tickFormatter={(value) => `$${value}`} tick={{ fontSize: 11, fill: '#71717a' }} />
-                <Tooltip formatter={(value) => formatCurrency(Number(value) * 100)} />
-                <Line type="monotone" dataKey="budget" stroke="#10b981" strokeWidth={2} dot={false} />
-                <Line type="monotone" dataKey="actual" stroke="#ef4444" strokeWidth={2} dot={false} />
-                <Scatter dataKey="actual" fill="#ef4444" />
+                <Tooltip content={(props) => <ChartTooltip {...props} />} cursor={{ stroke: '#a1a1aa', strokeDasharray: '3 3' }} />
+                <Area type="monotone" dataKey="overFill" baseLine={chartData[0]?.budget ?? 0} stroke="none" fill="url(#dashboard-over-budget)" dot={false} activeDot={false} isAnimationActive={false} />
+                <Area type="monotone" dataKey="underFill" baseLine={chartData[0]?.budget ?? 0} stroke="none" fill="url(#dashboard-under-budget)" dot={false} activeDot={false} isAnimationActive={false} />
+                <Line type="monotone" dataKey="budget" name="Budget" stroke="#3b82f6" strokeWidth={2} dot={false} />
+                <Line type="monotone" dataKey="spent" name="Spent" stroke="#eab308" strokeWidth={2} dot={false} />
+                <Scatter dataKey="spent" name="Spent" fill="#eab308" />
               </ComposedChart>
             </ResponsiveContainer>
           </div>
@@ -130,6 +157,33 @@ export function Dashboard() {
         />
         <div className="pointer-events-auto">
           <ChatBox pageId="dashboard" fullWidth onExpandedChange={setChatExpanded} />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ChartTooltip({ active, payload, label }: TooltipContentProps) {
+  if (!active || !payload?.length) return null
+
+  const point = payload.find((item) => item.payload)?.payload as ChartPoint | undefined
+  if (!point) return null
+
+  const overBudget = point.spent > point.budget
+  const borderClass = overBudget ? 'border-red-500/85' : 'border-emerald-500/85'
+  const spentClass = overBudget ? 'text-red-600 dark:text-red-700' : 'text-emerald-700 dark:text-emerald-700'
+
+  return (
+    <div className={`min-w-36 rounded-xl border ${borderClass} bg-white/72 px-3 py-2 text-[12px] shadow-lg shadow-zinc-900/10 backdrop-blur-md dark:bg-zinc-200/70 dark:shadow-black/25`}>
+      <div className="text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-800 dark:text-zinc-900">{label}</div>
+      <div className="mt-2 space-y-1">
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-zinc-600 dark:text-zinc-800">Budget</span>
+          <span className="font-semibold tabular-nums text-blue-600 dark:text-blue-700">{formatCurrency(point.budget * 100)}</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-zinc-600 dark:text-zinc-800">Spent</span>
+          <span className={`font-semibold tabular-nums ${spentClass}`}>{formatCurrency(point.spent * 100)}</span>
         </div>
       </div>
     </div>

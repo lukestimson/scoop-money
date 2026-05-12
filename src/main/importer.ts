@@ -160,8 +160,8 @@ function parseDate(value: string): number {
 function parseAmount(row: RawRow): number {
   const debit = pick(row, ['Debit'])
   const credit = pick(row, ['Credit'])
-  if (debit) return Math.abs(currencyToCents(debit))
-  if (credit) return -Math.abs(currencyToCents(credit))
+  if (debit) return -Math.abs(currencyToCents(debit))
+  if (credit) return Math.abs(currencyToCents(credit))
 
   const raw = pick(row, AMOUNT_KEYS)
   return currencyToCents(raw)
@@ -198,7 +198,7 @@ function parseCapitalOneRow(row: RawRow): ParsedTransaction {
   if (!dateText || !description) return { date: 0, description: '', amount: 0, raw_category: '', notes: '' }
   if (isCapitalOnePayment(description, category)) return { date: 0, description: '', amount: 0, raw_category: '', notes: '' }
 
-  const amount = debit ? Math.abs(currencyToCents(debit)) : credit ? -Math.abs(currencyToCents(credit)) : 0
+  const amount = debit ? -Math.abs(currencyToCents(debit)) : credit ? Math.abs(currencyToCents(credit)) : 0
   const rawCategory = mapCapitalOneCategory(category, description)
   return {
     date: parseDate(dateText),
@@ -300,15 +300,11 @@ function parseVenmoRow(row: RawRow): ParsedTransaction {
   if (!id || !dateText || !amountText || status.toLowerCase() !== 'complete') {
     return { date: 0, description: '', amount: 0, raw_category: '', notes: '' }
   }
-  if (type && !['payment', 'charge'].includes(type.toLowerCase())) {
-    return { date: 0, description: '', amount: 0, raw_category: '', notes: '' }
-  }
 
-  const venmoSigned = currencyToCents(amountText)
-  const amount = -venmoSigned
-  const counterparty = amount >= 0 ? to : from
+  const amount = currencyToCents(amountText)
+  const counterparty = amount < 0 ? to : from
   const rawCategory = mapVenmoCategory(note)
-  const direction = amount >= 0 ? 'paid' : 'received'
+  const direction = amount < 0 ? 'paid' : 'received'
 
   return {
     date: parseDate(dateText),

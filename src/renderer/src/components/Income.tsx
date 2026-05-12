@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import type { MouseEvent, ReactNode } from 'react'
 import type { BudgetItem, ExpectedIncomeEntry, IncomeEntry, IncomeKind, IncomeTaxSettings } from '../../../types/money'
 import { useAppContext } from '../context/AppContext'
 import { useDateFormat } from '../context/DateFormatContext'
@@ -10,13 +11,28 @@ import { ChatBox } from './ChatBox'
 
 const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 const INCOME_TYPES = ['Snappr', 'Thumbtack', 'Upwork', 'Stimsonphoto'] as const
+const INCOME_KIND_OPTIONS: Array<{ value: IncomeKind; label: string; detail: string }> = [
+  { value: 'w2', label: 'W-2', detail: 'Payroll job' },
+  { value: 'self_employment', label: 'Self-employed', detail: '1099 or freelance' },
+  { value: 'other', label: 'Other', detail: 'Not payroll taxed here' }
+]
 type IncomeTypeFilter = (typeof INCOME_TYPES)[number]
+type ExplanationPoint = { label: string; value: string }
+type Explanation = {
+  title: string
+  summary: string
+  calculation: string
+  points: ExplanationPoint[]
+  x: number
+  y: number
+}
 
 export function IncomeExpected() {
   const { dataVersion, bumpDataVersion } = useAppContext()
   const [entries, setEntries] = useState<ExpectedIncomeEntry[]>([])
   const [settings, setSettings] = useState<IncomeTaxSettings | null>(null)
   const [budget, setBudget] = useState<BudgetItem[]>([])
+  const [explanation, setExplanation] = useState<Explanation | null>(null)
 
   function reload(): void {
     Promise.all([
@@ -49,8 +65,24 @@ export function IncomeExpected() {
     bumpDataVersion()
   }
 
+  async function addIncomeSource(): Promise<void> {
+    await window.api.createExpectedIncomeEntry({
+      name: 'New Income Source',
+      notes: '',
+      annual_amount: 0,
+      income_kind: 'other'
+    })
+    reload()
+    bumpDataVersion()
+  }
+
+  function openExplanation(event: MouseEvent, next: Omit<Explanation, 'x' | 'y'>): void {
+    event.preventDefault()
+    setExplanation({ ...next, x: event.clientX, y: event.clientY })
+  }
+
   return (
-    <div className="h-full overflow-y-auto px-8 py-8">
+    <div className="relative h-full overflow-y-auto px-8 py-8" onClick={() => explanation && setExplanation(null)}>
       <div className="mb-5">
         <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">Income Expected</h1>
         <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">Expected gross income, tax estimate, and after-tax room against your expense plan.</p>
@@ -67,9 +99,13 @@ export function IncomeExpected() {
 
       {tax ? (
         <section className="mb-5 rounded-xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
-          <h2 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Quick View</h2>
-          <div className="grid grid-cols-5 gap-3 text-sm">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Quick View</h2>
+            <div className="text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-400">Monthly run rate</div>
+          </div>
+          <div className="grid grid-cols-6 gap-3 text-sm">
             <QuickMetric label="Income / mo" value={formatCurrency(tax.grossIncome / 12)} />
+            <QuickMetric label="Tax reserve / mo" value={formatCurrency(tax.totalTaxes / 12)} accent="text-red-600" />
             <QuickMetric label="After tax / mo" value={formatCurrency(afterTaxMonthly)} />
             <QuickMetric label="Needs / mo" value={formatCurrency(needs)} />
             <QuickMetric label="Wants / mo" value={formatCurrency(wants)} />
@@ -80,15 +116,18 @@ export function IncomeExpected() {
 
       <section className="mb-5 overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
         <div className="flex items-center justify-between border-b border-zinc-100 px-4 py-3 dark:border-zinc-800">
-          <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Income Sources</h2>
-          <button type="button" onClick={async () => { await window.api.createExpectedIncomeEntry({ annual_amount: 0 }); reload(); }} className="rounded-full bg-zinc-900 px-3 py-1.5 text-[12px] font-medium text-white dark:bg-zinc-100 dark:text-zinc-950">Add Source</button>
+          <div>
+            <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Income Sources</h2>
+            <p className="mt-0.5 text-[12px] text-zinc-500 dark:text-zinc-400">Annual and monthly edits stay linked.</p>
+          </div>
+          <button type="button" onClick={() => void addIncomeSource()} className="rounded-full bg-zinc-900 px-3 py-1.5 text-[12px] font-medium text-white dark:bg-zinc-100 dark:text-zinc-950">Add Source</button>
         </div>
-        <div className="grid grid-cols-[1fr_150px_150px_170px_80px] gap-3 border-b border-zinc-100 px-4 py-2 text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-500 dark:border-zinc-800">
+        <div className="grid grid-cols-[1fr_142px_142px_174px_86px] gap-3 border-b border-zinc-100 bg-zinc-50/60 px-4 py-2 text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950/50">
           <div>Source</div>
           <div className="text-right">Annual</div>
           <div className="text-right">Monthly</div>
           <div>Tax type</div>
-          <div className="text-right">Actions</div>
+          <div className="text-right">Remove</div>
         </div>
         {entries.map((entry) => (
           <ExpectedIncomeRow key={entry.id} entry={entry} onUpdate={updateEntry} onDelete={async () => { await window.api.deleteExpectedIncomeEntry(entry.id); reload(); bumpDataVersion(); }} />
@@ -97,10 +136,11 @@ export function IncomeExpected() {
 
       {settings && tax ? (
         <section className="grid grid-cols-[1fr_1fr] gap-5">
-          <TaxInputs settings={settings} onUpdate={updateSettings} />
-          <TaxResults result={tax} />
+          <TaxInputs settings={settings} onUpdate={updateSettings} onExplain={openExplanation} />
+          <TaxResults result={tax} settings={settings} needs={needs} wants={wants} onExplain={openExplanation} />
         </section>
       ) : null}
+      {explanation ? <ExplanationPopover explanation={explanation} onClose={() => setExplanation(null)} /> : null}
     </div>
   )
 }
@@ -221,57 +261,381 @@ export function IncomeSummary() {
 }
 
 function ExpectedIncomeRow({ entry, onUpdate, onDelete }: { entry: ExpectedIncomeEntry; onUpdate: (id: number, data: Partial<ExpectedIncomeEntry>) => Promise<void>; onDelete: () => Promise<void> }) {
+  const monthlyAmount = entry.annual_amount / 12
+
   return (
-    <div className="grid grid-cols-[1fr_150px_150px_170px_80px] items-center gap-3 border-b border-zinc-100 px-4 py-3 text-sm last:border-b-0 dark:border-zinc-800">
+    <div className="grid grid-cols-[1fr_142px_142px_174px_86px] items-center gap-3 border-b border-zinc-100 px-4 py-3 text-sm last:border-b-0 dark:border-zinc-800">
       <div className="min-w-0">
         <EditablePlain value={entry.name} onSave={(value) => onUpdate(entry.id, { name: value })} className="font-medium text-zinc-900 dark:text-zinc-100" />
         <EditablePlain value={entry.notes} onSave={(value) => onUpdate(entry.id, { notes: value })} className="mt-1 text-[12px] text-zinc-500 dark:text-zinc-400" fallback="No notes" />
       </div>
       <EditablePlain value={formatCurrency(entry.annual_amount)} align="right" onSave={(value) => onUpdate(entry.id, { annual_amount: parseCurrencyInput(value) })} />
-      <div className="text-right text-zinc-500 dark:text-zinc-400">{formatCurrency(entry.annual_amount / 12)}</div>
-      <select value={entry.income_kind} onChange={(event) => onUpdate(entry.id, { income_kind: event.target.value as IncomeKind })} className="rounded-lg border border-zinc-200 bg-white px-2 py-1.5 text-sm outline-none dark:border-zinc-700 dark:bg-zinc-950">
-        <option value="w2">W-2</option>
-        <option value="self_employment">Self-employed</option>
-        <option value="other">Other</option>
-      </select>
-      <button type="button" onClick={() => void onDelete()} className="text-right text-[12px] text-zinc-500 hover:text-red-600">Delete</button>
+      <EditablePlain value={formatCurrency(monthlyAmount)} align="right" onSave={(value) => onUpdate(entry.id, { annual_amount: parseCurrencyInput(value) * 12 })} className="text-zinc-600 dark:text-zinc-300" />
+      <IncomeKindMenu value={entry.income_kind} onChange={(value) => onUpdate(entry.id, { income_kind: value })} />
+      <button type="button" onClick={() => void onDelete()} className="justify-self-end rounded-full px-2 py-1 text-[12px] font-medium text-zinc-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/30 dark:hover:text-red-300">Delete</button>
     </div>
   )
 }
 
-function TaxInputs({ settings, onUpdate }: { settings: IncomeTaxSettings; onUpdate: (data: Partial<IncomeTaxSettings>) => Promise<void> }) {
+function IncomeKindMenu({ value, onChange }: { value: IncomeKind; onChange: (value: IncomeKind) => void | Promise<void> }) {
+  const [open, setOpen] = useState(false)
+  const selected = INCOME_KIND_OPTIONS.find((option) => option.value === value) ?? INCOME_KIND_OPTIONS[2]
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        className="flex w-full items-center justify-between rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-left text-sm shadow-sm transition-colors hover:border-zinc-300 dark:border-zinc-700 dark:bg-zinc-950 dark:hover:border-zinc-600"
+      >
+        <span>
+          <span className="block font-medium text-zinc-800 dark:text-zinc-100">{selected.label}</span>
+          <span className="block text-[11px] text-zinc-400">{selected.detail}</span>
+        </span>
+        <ChevronIcon direction={open ? 'up' : 'down'} />
+      </button>
+      {open ? (
+        <div className="absolute left-0 right-0 top-[calc(100%+6px)] z-30 overflow-hidden rounded-xl border border-zinc-200 bg-white/95 p-1 shadow-xl shadow-zinc-900/10 backdrop-blur dark:border-zinc-700 dark:bg-zinc-900/95">
+          {INCOME_KIND_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => {
+                setOpen(false)
+                void onChange(option.value)
+              }}
+              className={`block w-full rounded-lg px-2.5 py-2 text-left transition-colors ${
+                value === option.value
+                  ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950'
+                  : 'text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800'
+              }`}
+            >
+              <span className="block text-[12px] font-medium">{option.label}</span>
+              <span className={`block text-[11px] ${value === option.value ? 'text-white/70 dark:text-zinc-600' : 'text-zinc-400'}`}>{option.detail}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function TaxInputs({
+  settings,
+  onUpdate,
+  onExplain
+}: {
+  settings: IncomeTaxSettings
+  onUpdate: (data: Partial<IncomeTaxSettings>) => Promise<void>
+  onExplain: (event: MouseEvent, explanation: Omit<Explanation, 'x' | 'y'>) => void
+}) {
   return (
     <section className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
-      <h2 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Tax Inputs</h2>
+      <div className="mb-3">
+        <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Editable Tax Assumptions</h2>
+        <p className="mt-1 text-[12px] text-zinc-500 dark:text-zinc-400">These are saved assumptions used by the calculation rows.</p>
+      </div>
       <div className="space-y-2 text-sm">
-        <TaxInput label="401k / IRA contribution" value={settings.retirement_contribution} onSave={(value) => onUpdate({ retirement_contribution: value })} />
-        <TaxInput label="Above-the-line deductions" value={settings.above_line_deductions} onSave={(value) => onUpdate({ above_line_deductions: value })} />
-        <TaxInput label="Federal standard deduction" value={settings.federal_standard_deduction} onSave={(value) => onUpdate({ federal_standard_deduction: value })} />
-        <TaxInput label="CA standard deduction" value={settings.ca_standard_deduction} onSave={(value) => onUpdate({ ca_standard_deduction: value })} />
-        <TaxInput label="CA bracket adjustment" value={settings.ca_bracket_adjustment} onSave={(value) => onUpdate({ ca_bracket_adjustment: value })} />
-        <TaxInput label="Social Security wage base" value={settings.social_security_wage_base} onSave={(value) => onUpdate({ social_security_wage_base: value })} />
+        <TaxInput label="401k / IRA contribution" value={settings.retirement_contribution} onSave={(value) => onUpdate({ retirement_contribution: value })} onExplain={(event) => onExplain(event, inputExplanation('401k / IRA contribution', 'Pre-tax retirement contributions reduce the federal AGI estimate used here.', settings.retirement_contribution))} />
+        <TaxInput label="Above-the-line deductions" value={settings.above_line_deductions} onSave={(value) => onUpdate({ above_line_deductions: value })} onExplain={(event) => onExplain(event, inputExplanation('Above-the-line deductions', 'Additional deductions subtracted before taxable income is calculated.', settings.above_line_deductions))} />
+        <TaxInput label="Federal standard deduction" value={settings.federal_standard_deduction} onSave={(value) => onUpdate({ federal_standard_deduction: value })} onExplain={(event) => onExplain(event, inputExplanation('Federal standard deduction', 'Deduction subtracted from federal AGI to estimate federal taxable income.', settings.federal_standard_deduction))} />
+        <TaxInput label="CA standard deduction" value={settings.ca_standard_deduction} onSave={(value) => onUpdate({ ca_standard_deduction: value })} onExplain={(event) => onExplain(event, inputExplanation('CA standard deduction', 'Deduction subtracted from federal AGI for the California taxable estimate.', settings.ca_standard_deduction))} />
+        <TaxInput label="CA bracket adjustment" value={settings.ca_bracket_adjustment} onSave={(value) => onUpdate({ ca_bracket_adjustment: value })} onExplain={(event) => onExplain(event, inputExplanation('CA bracket adjustment', 'Adjustment applied before running the California bracket estimate.', settings.ca_bracket_adjustment))} />
+        <TaxInput label="Social Security wage base" value={settings.social_security_wage_base} onSave={(value) => onUpdate({ social_security_wage_base: value })} onExplain={(event) => onExplain(event, inputExplanation('Social Security wage base', 'Maximum W-2 wage amount subject to Social Security tax in this estimate.', settings.social_security_wage_base))} />
       </div>
     </section>
   )
 }
 
-function TaxResults({ result }: { result: ReturnType<typeof calculateIncomeTaxes> }) {
+function TaxResults({
+  result,
+  settings,
+  needs,
+  wants,
+  onExplain
+}: {
+  result: ReturnType<typeof calculateIncomeTaxes>
+  settings: IncomeTaxSettings
+  needs: number
+  wants: number
+  onExplain: (event: MouseEvent, explanation: Omit<Explanation, 'x' | 'y'>) => void
+}) {
   return (
     <section className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
-      <h2 className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Tax Calculation</h2>
-      <div className="space-y-2 text-sm">
-        <Readout label="Federal AGI" value={formatCurrency(result.federalAgi)} />
-        <Readout label="Federal taxable income" value={formatCurrency(result.federalTaxableIncome)} />
-        <Readout label="CA taxable income" value={formatCurrency(result.caTaxableIncome)} />
-        <Readout label="Federal income tax" value={formatCurrency(result.federalIncomeTax)} />
-        <Readout label="California income tax" value={formatCurrency(result.caIncomeTax)} />
-        <Readout label="Social Security" value={formatCurrency(result.socialSecurityTax)} />
-        <Readout label="Medicare" value={formatCurrency(result.medicareTax)} />
-        <Readout label="Self-employment tax" value={formatCurrency(result.selfEmploymentTax)} />
-        <Readout label="Half SE tax deduction" value={formatCurrency(result.halfSelfEmploymentTaxDeduction)} />
-        <Readout label="After taxes" value={formatCurrency(result.afterTaxIncome)} strong />
+      <div className="mb-3">
+        <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Tax Calculation</h2>
+        <p className="mt-1 text-[12px] text-zinc-500 dark:text-zinc-400">Gross income flows through deductions, taxable income, payroll tax, and take-home.</p>
+      </div>
+      <div className="space-y-4 text-sm">
+        <TaxGroup title="Income base">
+          <Readout label="Gross income" value={formatCurrency(result.grossIncome)} onExplain={(event) => onExplain(event, taxExplanation('grossIncome', result, settings, needs, wants))} />
+          <Readout label="W-2 income" value={formatCurrency(result.w2Income)} onExplain={(event) => onExplain(event, taxExplanation('w2Income', result, settings, needs, wants))} />
+          <Readout label="Self-employment income" value={formatCurrency(result.selfEmploymentIncome)} onExplain={(event) => onExplain(event, taxExplanation('selfEmploymentIncome', result, settings, needs, wants))} />
+          <Readout label="Half SE tax deduction" value={formatCurrency(result.halfSelfEmploymentTaxDeduction)} onExplain={(event) => onExplain(event, taxExplanation('halfSelfEmploymentTaxDeduction', result, settings, needs, wants))} />
+          <Readout label="Federal AGI" value={formatCurrency(result.federalAgi)} strong onExplain={(event) => onExplain(event, taxExplanation('federalAgi', result, settings, needs, wants))} />
+        </TaxGroup>
+        <TaxGroup title="Taxable income">
+          <Readout label="Federal taxable income" value={formatCurrency(result.federalTaxableIncome)} onExplain={(event) => onExplain(event, taxExplanation('federalTaxableIncome', result, settings, needs, wants))} />
+          <Readout label="CA taxable income" value={formatCurrency(result.caTaxableIncome)} onExplain={(event) => onExplain(event, taxExplanation('caTaxableIncome', result, settings, needs, wants))} />
+        </TaxGroup>
+        <TaxGroup title="Estimated taxes">
+          <Readout label="Federal income tax" value={formatCurrency(result.federalIncomeTax)} onExplain={(event) => onExplain(event, taxExplanation('federalIncomeTax', result, settings, needs, wants))} />
+          <Readout label="California income tax" value={formatCurrency(result.caIncomeTax)} onExplain={(event) => onExplain(event, taxExplanation('caIncomeTax', result, settings, needs, wants))} />
+          <Readout label="Social Security" value={formatCurrency(result.socialSecurityTax)} onExplain={(event) => onExplain(event, taxExplanation('socialSecurityTax', result, settings, needs, wants))} />
+          <Readout label="Medicare" value={formatCurrency(result.medicareTax)} onExplain={(event) => onExplain(event, taxExplanation('medicareTax', result, settings, needs, wants))} />
+          <Readout label="Self-employment tax" value={formatCurrency(result.selfEmploymentTax)} onExplain={(event) => onExplain(event, taxExplanation('selfEmploymentTax', result, settings, needs, wants))} />
+        </TaxGroup>
+        <TaxGroup title="Take-home">
+          <Readout label="Total taxes" value={formatCurrency(result.totalTaxes)} onExplain={(event) => onExplain(event, taxExplanation('totalTaxes', result, settings, needs, wants))} />
+          <Readout label="Effective rate" value={`${(result.effectiveRate * 100).toFixed(1)}%`} onExplain={(event) => onExplain(event, taxExplanation('effectiveRate', result, settings, needs, wants))} />
+          <Readout label="After taxes" value={formatCurrency(result.afterTaxIncome)} strong onExplain={(event) => onExplain(event, taxExplanation('afterTaxIncome', result, settings, needs, wants))} />
+          <Readout label="Monthly left over" value={formatCurrency(result.afterTaxIncome / 12 - needs - wants)} strong={result.afterTaxIncome / 12 >= needs + wants} onExplain={(event) => onExplain(event, taxExplanation('monthlyLeftOver', result, settings, needs, wants))} />
+        </TaxGroup>
       </div>
     </section>
+  )
+}
+
+function inputExplanation(title: string, summary: string, value: number): Omit<Explanation, 'x' | 'y'> {
+  return {
+    title,
+    summary,
+    calculation: 'Editable assumption. The saved value is inserted into the tax estimate wherever this row is referenced.',
+    points: [{ label: 'Saved value', value: formatCurrency(value) }]
+  }
+}
+
+function taxExplanation(
+  key: string,
+  result: ReturnType<typeof calculateIncomeTaxes>,
+  settings: IncomeTaxSettings,
+  needs: number,
+  wants: number
+): Omit<Explanation, 'x' | 'y'> {
+  const totalPlan = needs + wants
+  const monthlyAfterTax = result.afterTaxIncome / 12
+
+  switch (key) {
+    case 'grossIncome':
+      return {
+        title: 'Gross income',
+        summary: 'Total expected annual income before deductions and taxes.',
+        calculation: 'Sum of every income source annual amount.',
+        points: [
+          { label: 'W-2 income', value: formatCurrency(result.w2Income) },
+          { label: 'Self-employment income', value: formatCurrency(result.selfEmploymentIncome) },
+          { label: 'Other income', value: formatCurrency(result.grossIncome - result.w2Income - result.selfEmploymentIncome) },
+          { label: 'Gross income', value: formatCurrency(result.grossIncome) }
+        ]
+      }
+    case 'w2Income':
+      return {
+        title: 'W-2 income',
+        summary: 'Income marked as payroll work.',
+        calculation: 'Sum of income sources with tax type W-2.',
+        points: [{ label: 'W-2 income', value: formatCurrency(result.w2Income) }]
+      }
+    case 'selfEmploymentIncome':
+      return {
+        title: 'Self-employment income',
+        summary: 'Income marked as freelance, 1099, or self-employed work.',
+        calculation: 'Sum of income sources with tax type Self-employed.',
+        points: [{ label: 'Self-employment income', value: formatCurrency(result.selfEmploymentIncome) }]
+      }
+    case 'halfSelfEmploymentTaxDeduction':
+      return {
+        title: 'Half SE tax deduction',
+        summary: 'The deductible half of estimated self-employment tax.',
+        calculation: 'Self-employment tax divided by 2.',
+        points: [
+          { label: 'Self-employment tax', value: formatCurrency(result.selfEmploymentTax) },
+          { label: 'Deductible half', value: formatCurrency(result.halfSelfEmploymentTaxDeduction) }
+        ]
+      }
+    case 'federalAgi':
+      return {
+        title: 'Federal AGI',
+        summary: 'Adjusted gross income estimate before the standard deduction.',
+        calculation: 'Gross income - retirement contribution - above-the-line deductions - half SE tax deduction.',
+        points: [
+          { label: 'Gross income', value: formatCurrency(result.grossIncome) },
+          { label: 'Retirement contribution', value: `-${formatCurrency(settings.retirement_contribution)}` },
+          { label: 'Above-the-line deductions', value: `-${formatCurrency(settings.above_line_deductions)}` },
+          { label: 'Half SE tax deduction', value: `-${formatCurrency(result.halfSelfEmploymentTaxDeduction)}` },
+          { label: 'Federal AGI', value: formatCurrency(result.federalAgi) }
+        ]
+      }
+    case 'federalTaxableIncome':
+      return {
+        title: 'Federal taxable income',
+        summary: 'Income passed into the federal tax bracket estimate.',
+        calculation: 'Federal AGI - federal standard deduction, floored at zero.',
+        points: [
+          { label: 'Federal AGI', value: formatCurrency(result.federalAgi) },
+          { label: 'Standard deduction', value: `-${formatCurrency(settings.federal_standard_deduction)}` },
+          { label: 'Taxable income', value: formatCurrency(result.federalTaxableIncome) }
+        ]
+      }
+    case 'caTaxableIncome':
+      return {
+        title: 'CA taxable income',
+        summary: 'California taxable income estimate before the app-level bracket adjustment.',
+        calculation: 'Federal AGI - CA standard deduction, floored at zero.',
+        points: [
+          { label: 'Federal AGI', value: formatCurrency(result.federalAgi) },
+          { label: 'CA standard deduction', value: `-${formatCurrency(settings.ca_standard_deduction)}` },
+          { label: 'CA taxable income', value: formatCurrency(result.caTaxableIncome) }
+        ]
+      }
+    case 'federalIncomeTax':
+      return {
+        title: 'Federal income tax',
+        summary: 'Estimated federal bracket tax on taxable income.',
+        calculation: 'Federal taxable income is passed through the app federal single-filer bracket table.',
+        points: [
+          { label: 'Federal taxable income', value: formatCurrency(result.federalTaxableIncome) },
+          { label: 'Federal income tax', value: formatCurrency(result.federalIncomeTax) }
+        ]
+      }
+    case 'caIncomeTax':
+      return {
+        title: 'California income tax',
+        summary: 'Estimated California bracket tax.',
+        calculation: 'Max(CA taxable income - CA bracket adjustment, 0) is passed through the app CA bracket table.',
+        points: [
+          { label: 'CA taxable income', value: formatCurrency(result.caTaxableIncome) },
+          { label: 'CA bracket adjustment', value: `-${formatCurrency(settings.ca_bracket_adjustment)}` },
+          { label: 'CA bracket base', value: formatCurrency(Math.max(0, result.caTaxableIncome - settings.ca_bracket_adjustment)) },
+          { label: 'California income tax', value: formatCurrency(result.caIncomeTax) }
+        ]
+      }
+    case 'socialSecurityTax':
+      return {
+        title: 'Social Security',
+        summary: 'Payroll Social Security estimate for W-2 income.',
+        calculation: 'Min(W-2 income, Social Security wage base) x 6.2%.',
+        points: [
+          { label: 'W-2 income', value: formatCurrency(result.w2Income) },
+          { label: 'Wage base', value: formatCurrency(settings.social_security_wage_base) },
+          { label: 'Taxed wages', value: formatCurrency(Math.min(Math.max(0, result.w2Income), settings.social_security_wage_base)) },
+          { label: 'Social Security', value: formatCurrency(result.socialSecurityTax) }
+        ]
+      }
+    case 'medicareTax':
+      return {
+        title: 'Medicare',
+        summary: 'Payroll Medicare estimate for W-2 income.',
+        calculation: 'W-2 income x 1.45%.',
+        points: [
+          { label: 'W-2 income', value: formatCurrency(result.w2Income) },
+          { label: 'Medicare', value: formatCurrency(result.medicareTax) }
+        ]
+      }
+    case 'selfEmploymentTax':
+      return {
+        title: 'Self-employment tax',
+        summary: 'Estimated Social Security and Medicare tax on self-employment income.',
+        calculation: 'Self-employment income x 92.35% x 15.3%.',
+        points: [
+          { label: 'Self-employment income', value: formatCurrency(result.selfEmploymentIncome) },
+          { label: 'Taxable SE base', value: formatCurrency(Math.round(Math.max(0, result.selfEmploymentIncome) * 0.9235)) },
+          { label: 'Self-employment tax', value: formatCurrency(result.selfEmploymentTax) }
+        ]
+      }
+    case 'totalTaxes':
+      return {
+        title: 'Total taxes',
+        summary: 'Combined estimated income and payroll taxes.',
+        calculation: 'Federal income tax + California income tax + Social Security + Medicare + self-employment tax.',
+        points: [
+          { label: 'Federal income tax', value: formatCurrency(result.federalIncomeTax) },
+          { label: 'California income tax', value: formatCurrency(result.caIncomeTax) },
+          { label: 'Social Security', value: formatCurrency(result.socialSecurityTax) },
+          { label: 'Medicare', value: formatCurrency(result.medicareTax) },
+          { label: 'Self-employment tax', value: formatCurrency(result.selfEmploymentTax) },
+          { label: 'Total taxes', value: formatCurrency(result.totalTaxes) }
+        ]
+      }
+    case 'effectiveRate':
+      return {
+        title: 'Effective rate',
+        summary: 'Share of gross income estimated for taxes.',
+        calculation: 'Total taxes divided by gross income.',
+        points: [
+          { label: 'Total taxes', value: formatCurrency(result.totalTaxes) },
+          { label: 'Gross income', value: formatCurrency(result.grossIncome) },
+          { label: 'Effective rate', value: `${(result.effectiveRate * 100).toFixed(1)}%` }
+        ]
+      }
+    case 'afterTaxIncome':
+      return {
+        title: 'After taxes',
+        summary: 'Expected annual take-home after estimated taxes.',
+        calculation: 'Gross income - total taxes.',
+        points: [
+          { label: 'Gross income', value: formatCurrency(result.grossIncome) },
+          { label: 'Total taxes', value: `-${formatCurrency(result.totalTaxes)}` },
+          { label: 'After taxes', value: formatCurrency(result.afterTaxIncome) }
+        ]
+      }
+    case 'monthlyLeftOver':
+      return {
+        title: 'Monthly left over',
+        summary: 'Expected monthly money remaining after taxes, needs, and wants.',
+        calculation: 'After-tax annual income / 12 - needs per month - wants per month.',
+        points: [
+          { label: 'After tax / mo', value: formatCurrency(monthlyAfterTax) },
+          { label: 'Needs / mo', value: `-${formatCurrency(needs)}` },
+          { label: 'Wants / mo', value: `-${formatCurrency(wants)}` },
+          { label: 'Budget plan / mo', value: formatCurrency(totalPlan) },
+          { label: 'Left over / mo', value: formatCurrency(monthlyAfterTax - totalPlan) }
+        ]
+      }
+    default:
+      return {
+        title: 'Calculation',
+        summary: 'This row is derived from the expected income and tax assumptions.',
+        calculation: 'The app recalculates this value when sources or tax inputs change.',
+        points: []
+      }
+  }
+}
+
+function ExplanationPopover({ explanation, onClose }: { explanation: Explanation; onClose: () => void }) {
+  const left = Math.min(explanation.x + 12, window.innerWidth - 380)
+  const top = Math.max(16, Math.min(explanation.y + 12, window.innerHeight - 420))
+
+  return (
+    <div
+      role="dialog"
+      aria-label={explanation.title}
+      onClick={(event) => event.stopPropagation()}
+      style={{ left: Math.max(16, left), top, maxHeight: `calc(100vh - ${top + 16}px)` }}
+      className="fixed z-50 w-[360px] overflow-y-auto rounded-2xl border border-zinc-200 bg-white/92 p-4 shadow-2xl shadow-zinc-900/15 backdrop-blur-xl dark:border-zinc-700 dark:bg-zinc-900/92 dark:shadow-black/35"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-400">Calculation</div>
+          <h3 className="mt-1 text-sm font-semibold text-zinc-900 dark:text-zinc-100">{explanation.title}</h3>
+        </div>
+        <button type="button" onClick={onClose} className="rounded-full px-2 py-1 text-[12px] font-medium text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200">Close</button>
+      </div>
+      <p className="mt-3 text-sm leading-5 text-zinc-600 dark:text-zinc-300">{explanation.summary}</p>
+      <div className="mt-3 rounded-xl bg-zinc-50 p-3 dark:bg-zinc-950">
+        <div className="text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-400">Formula</div>
+        <p className="mt-1 text-sm text-zinc-700 dark:text-zinc-200">{explanation.calculation}</p>
+      </div>
+      {explanation.points.length ? (
+        <div className="mt-3 overflow-hidden rounded-xl border border-zinc-100 dark:border-zinc-800">
+          {explanation.points.map((point) => (
+            <div key={point.label} className="flex items-center justify-between gap-4 border-b border-zinc-100 px-3 py-2 text-sm last:border-b-0 dark:border-zinc-800">
+              <span className="text-zinc-500 dark:text-zinc-400">{point.label}</span>
+              <span className="font-medium tabular-nums text-zinc-800 dark:text-zinc-100">{point.value}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
   )
 }
 
@@ -377,18 +741,27 @@ function incomeBadgeClass(type: IncomeTypeFilter): string {
   return 'bg-violet-50 text-violet-700 ring-violet-200 dark:bg-violet-950/30 dark:text-violet-300 dark:ring-violet-900'
 }
 
-function TaxInput({ label, value, onSave }: { label: string; value: number; onSave: (value: number) => Promise<void> }) {
+function TaxInput({ label, value, onSave, onExplain }: { label: string; value: number; onSave: (value: number) => Promise<void>; onExplain: (event: MouseEvent) => void }) {
   return (
-    <div className="flex items-center justify-between gap-4 rounded-lg bg-zinc-50 px-3 py-2 dark:bg-zinc-950">
+    <div onContextMenu={onExplain} className="flex items-center justify-between gap-4 rounded-lg bg-zinc-50 px-3 py-2 dark:bg-zinc-950">
       <span className="text-zinc-600 dark:text-zinc-300">{label}</span>
       <EditablePlain value={formatCurrency(value)} align="right" onSave={(next) => onSave(parseCurrencyInput(next))} className="font-medium" />
     </div>
   )
 }
 
-function Readout({ label, value, strong = false }: { label: string; value: string; strong?: boolean }) {
+function TaxGroup({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <div className="flex items-center justify-between gap-4 border-b border-zinc-100 py-1.5 last:border-b-0 dark:border-zinc-800">
+    <div>
+      <div className="mb-1.5 text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-400">{title}</div>
+      <div className="overflow-hidden rounded-lg border border-zinc-100 bg-zinc-50/70 dark:border-zinc-800 dark:bg-zinc-950/55">{children}</div>
+    </div>
+  )
+}
+
+function Readout({ label, value, strong = false, onExplain }: { label: string; value: string; strong?: boolean; onExplain?: (event: MouseEvent) => void }) {
+  return (
+    <div onContextMenu={onExplain} className="flex items-center justify-between gap-4 border-b border-zinc-100 px-3 py-2 last:border-b-0 dark:border-zinc-800">
       <span className="text-zinc-500 dark:text-zinc-400">{label}</span>
       <span className={strong ? 'font-semibold text-zinc-900 dark:text-zinc-100' : 'font-medium text-zinc-700 dark:text-zinc-200'}>{value}</span>
     </div>
@@ -495,6 +868,14 @@ function FilterIcon() {
       <path d="M4 6h12" />
       <path d="M6.5 10h7" />
       <path d="M9 14h2" />
+    </svg>
+  )
+}
+
+function ChevronIcon({ direction }: { direction: 'up' | 'down' }) {
+  return (
+    <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      {direction === 'up' ? <path d="m5 12 5-5 5 5" /> : <path d="m5 8 5 5 5-5" />}
     </svg>
   )
 }

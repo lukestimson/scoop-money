@@ -26,7 +26,7 @@ export type CanonicalBudgetCategory = (typeof BUDGET_CATEGORY_ORDER)[number]
 
 export const BUDGET_CATEGORY_ALLOWLIST = new Set<string>(BUDGET_CATEGORY_ORDER)
 
-/** Default “need” vs “nice” for category rows and new line items when not specified. */
+/** Default need vs want for category rows and new line items when not specified. */
 const NEED_CATEGORIES = new Set<string>([
   'Rent',
   'Utilities',

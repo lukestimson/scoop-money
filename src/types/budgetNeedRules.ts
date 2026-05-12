@@ -1,8 +1,8 @@
 import { defaultIsNeedForBudgetCategory } from './budgetCategories'
 
 /**
- * Infer need vs nice-to-have for a budget line from the Living Expenses workbook
- * ("Must-Have Expenses" vs "Nice-to-Have Expenses" sections in All Living Expenses 2026).
+ * Infer need vs want for a budget line from the Living Expenses workbook
+ * ("Needs" vs "Wants" sections — historically "Must-Have" / "Nice-to-Have" in the xlsx).
  */
 export function inferLineIsNeed(category: string, label: string): boolean {
   const c = category.trim()
@@ -23,7 +23,7 @@ export function inferLineIsNeed(category: string, label: string): boolean {
     return true
   }
 
-  const niceOnly = new Set([
+  const wantsOnly = new Set([
     'Dining',
     'Bar/ Alcohol',
     'Travel',
@@ -31,7 +31,7 @@ export function inferLineIsNeed(category: string, label: string): boolean {
     'Entertainment',
     'AI Fees'
   ])
-  if (niceOnly.has(c)) return false
+  if (wantsOnly.has(c)) return false
 
   const needOnly = new Set([
     'Rent',
@@ -49,7 +49,7 @@ export function inferLineIsNeed(category: string, label: string): boolean {
   return defaultIsNeedForBudgetCategory(c)
 }
 
-export type CategoryNeedKind = 'need' | 'nice' | 'mixed' | 'empty'
+export type CategoryNeedKind = 'need' | 'wants' | 'mixed' | 'empty'
 
 export function categoryNeedKindFromLines(
   lines: ReadonlyArray<{ is_need: boolean; section: string }>
@@ -57,6 +57,6 @@ export function categoryNeedKindFromLines(
   const relevant = lines.filter((line) => line.section !== 'Parental & Gov Help')
   if (relevant.length === 0) return 'empty'
   if (relevant.every((line) => line.is_need)) return 'need'
-  if (relevant.every((line) => !line.is_need)) return 'nice'
+  if (relevant.every((line) => !line.is_need)) return 'wants'
   return 'mixed'
 }
