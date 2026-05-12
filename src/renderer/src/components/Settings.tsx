@@ -119,7 +119,7 @@ function BudgetCategoriesSection() {
         {sortedItems.map((item) => (
           <div key={item.id} className="grid grid-cols-[1fr_96px_115px_115px_115px_72px] items-center gap-3 rounded-lg bg-zinc-50 px-3 py-2 text-sm dark:bg-zinc-950">
             <EditablePlain value={item.category} onSave={async (value) => { await window.api.updateBudgetItem(item.id, { category: value }); reload(); bumpDataVersion(); }} />
-            <button type="button" onClick={async () => { await window.api.updateBudgetItem(item.id, { is_need: !item.is_need }); reload(); bumpDataVersion(); }} className="rounded-full bg-white px-2.5 py-1 text-[12px] text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200">{item.is_need ? 'Need' : 'Nice'}</button>
+            <button type="button" onClick={async () => { await window.api.updateBudgetItem(item.id, { is_need: !item.is_need }); reload(); bumpDataVersion(); }} className="rounded-full bg-white px-2.5 py-1 text-[12px] text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200">{item.is_need ? 'Need' : 'Want'}</button>
             <EditablePlain value={formatCurrency(item.amount_standard)} align="right" onSave={async (value) => { await window.api.updateBudgetItem(item.id, { amount_standard: parseCurrencyInput(value) }); reload(); bumpDataVersion(); }} />
             <EditablePlain value={formatCurrency(item.amount_with_parents)} align="right" onSave={async (value) => { await window.api.updateBudgetItem(item.id, { amount_with_parents: parseCurrencyInput(value) }); reload(); bumpDataVersion(); }} />
             <EditablePlain value={formatCurrency(item.amount_with_aid)} align="right" onSave={async (value) => { await window.api.updateBudgetItem(item.id, { amount_with_aid: parseCurrencyInput(value) }); reload(); bumpDataVersion(); }} />

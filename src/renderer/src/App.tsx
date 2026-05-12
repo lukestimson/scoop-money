@@ -11,7 +11,7 @@ type NavGroup = 'expenses' | 'income'
 
 const EXPENSE_PAGES: Array<{ id: NavPage; label: string }> = [
   { id: 'expenses-budget', label: 'Budget' },
-  { id: 'expenses-actual', label: 'Actual' },
+  { id: 'expenses-actual', label: 'Transactions' },
   { id: 'expenses-summary', label: 'Summary' }
 ]
 

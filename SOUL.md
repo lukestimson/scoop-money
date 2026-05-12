@@ -764,12 +764,24 @@ Every user action needs immediate feedback:
 - Copy actions show a short visual confirmation.
 - Data-mutating actions call `bumpLeadsVersion()` or trigger `leads:dataMutated`.
 
+### Dismiss-on-Escape and Click-Away
+
+All transient UI surfaces must close when the user presses Escape or clicks/taps outside them. This is a core interaction principle:
+
+- Dropdowns, sort menus, popovers, and context menus close on Escape and click-away.
+- Inline edit modes revert or cancel on Escape.
+- Add-row states (e.g. new transaction, new budget line) cancel on Escape when empty.
+- Use controlled state (not `<details>`) for menus so dismiss behavior is explicit and testable.
+- Click-away detection should use `pointerdown` on `document` with a `ref` check on the menu container.
+
+Never leave a transient surface open after the user signals they are done with it.
+
 ### Keyboard Standards
 
 Keyboard behavior should be predictable:
 
 - Enter commits inline edits.
-- Escape cancels or exits focused modes.
+- Escape cancels or exits focused modes (see Dismiss-on-Escape above).
 - Cmd/Ctrl+Z triggers app undo only when no input/textarea/select/contenteditable is focused.
 - Cmd/Ctrl +/- / 0 controls app text scale, not Chromium zoom.
 - Tab in notes indents/outdents line levels.

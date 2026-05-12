@@ -63,7 +63,7 @@ export interface BudgetLineItem {
   annual_amount: number
   notes: string
   support_scope: BudgetSupportScope
-  /** Whether this line counts as a need vs nice-to-have (filters + reporting). */
+  /** Whether this line counts as a need vs a want (filters + reporting). */
   is_need: boolean
   created_at: number
   updated_at: number
