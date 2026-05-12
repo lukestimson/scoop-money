@@ -195,7 +195,7 @@ function seedMissingPreviewBudgetLines(): void {
 seedMissingPreviewBudgetLines()
 
 function tx(date: number, description: string, amount: number, category: string, accountId: number): Transaction {
-  return { id: id(), date, description, amount, raw_category: category, mapped_category: category, account_id: accountId, source: 'csv_import', notes: '', created_at: now, updated_at: now }
+  return { id: id(), date, description, amount, raw_category: category, mapped_category: category, account_id: accountId, source: 'csv_import', notes: '', income_candidate: false, created_at: now, updated_at: now }
 }
 
 function income(date: number, shoot: string, company: string, amount: number): IncomeEntry {
@@ -283,6 +283,21 @@ export function installBrowserMockApi(): void {
       return { imported: 1, skipped: 0, errors: [], transactions: [copy(row)] }
     },
     getImportedFiles: async () => copy(importedFiles),
+    clearIncomeCandidateFlags: async (ids) => {
+      for (const t of transactions) { if (ids.includes(t.id)) t.income_candidate = false }
+    },
+    clearImportedFile: async (fileId) => {
+      const file = importedFiles.find((f) => f.id === fileId)
+      if (!file) return { transactions: [] }
+      const affected = transactions.filter(
+        (t) => t.source === 'csv_import' && t.account_id === file.account_id &&
+          file.first_transaction_date && file.last_transaction_date &&
+          t.date >= file.first_transaction_date && t.date <= file.last_transaction_date
+      )
+      transactions = transactions.filter((t) => !affected.some((a) => a.id === t.id))
+      importedFiles = importedFiles.filter((f) => f.id !== fileId)
+      return { transactions: copy(affected) }
+    },
     getPathForFile: (file) => file.name,
 
     getBudgetItems: async () => copy(budgetItems),

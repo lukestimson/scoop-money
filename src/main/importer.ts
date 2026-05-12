@@ -6,6 +6,7 @@ import type { ImportedFilePreview, ImportResult, Transaction } from '../types/mo
 import {
   applyRulesToCategory,
   createTransaction,
+  getOrCreateAccountByName,
   recordImportedFile,
   transactionExists
 } from './database'
@@ -18,8 +19,27 @@ const DESCRIPTION_KEYS = ['Description', 'Merchant', 'Payee', 'Name']
 const AMOUNT_KEYS = ['Amount', 'Debit', 'Credit', 'Transaction Amount']
 const CATEGORY_KEYS = ['Category', 'Type', 'Transaction Type']
 
+function detectAccountId(filePath: string): number | null {
+  const fileName = basename(filePath).toLowerCase()
+  const content = readFileSync(filePath, 'utf8')
+  if (fileName.includes('venmo') || isVenmoStatement(content)) {
+    return getOrCreateAccountByName('Venmo', 'venmo').id
+  }
+  if (fileName.includes('transaction_download') || isCapitalOneStatement(content)) {
+    return getOrCreateAccountByName('Capital One', 'credit').id
+  }
+  if (fileName.includes('chase')) {
+    return getOrCreateAccountByName('Chase', 'checking').id
+  }
+  if (fileName.includes('ebt')) {
+    return getOrCreateAccountByName('EBT', 'checking').id
+  }
+  return null
+}
+
 export async function importTransactionsFromFile(filePath: string, accountId: number): Promise<ImportResult> {
   const rows = readRows(filePath)
+  const resolvedAccountId = detectAccountId(filePath) ?? accountId
   const transactions: Transaction[] = []
   const errors: string[] = []
   const parsedDates: number[] = []
@@ -41,11 +61,14 @@ export async function importTransactionsFromFile(filePath: string, accountId: nu
       }
       seenInFile.add(duplicateKey)
       const mapped = applyRulesToCategory(parsed.raw_category, parsed.description) || parsed.raw_category || 'Uncategorized'
+      const provider = pick(row, ['__provider'])
+      const isIncomeCandidate = provider === 'venmo' && parsed.amount > 0 && isVenmoIncomeCandidate(parsed.description)
       const transaction = createTransaction({
         ...parsed,
-        account_id: accountId,
+        account_id: resolvedAccountId,
         mapped_category: mapped,
-        source: 'csv_import'
+        source: 'csv_import',
+        income_candidate: isIncomeCandidate
       })
       transactions.push(transaction)
     } catch (error) {
@@ -60,7 +83,7 @@ export async function importTransactionsFromFile(filePath: string, accountId: nu
     file_path: filePath,
     file_size: fileSize(filePath),
     file_type: extname(filePath).replace('.', '').toUpperCase() || 'FILE',
-    account_id: accountId,
+    account_id: resolvedAccountId,
     imported_count: transactions.length,
     skipped_count: skipped,
     error_count: errors.length,
@@ -324,19 +347,44 @@ function parseVenmoRow(row: RawRow): ParsedTransaction {
 
 function mapVenmoCategory(note: string): string {
   const text = note.toLowerCase()
-  if (/\b(rent|april|may|june|july|august|september|october|november|december|january|february|march)\b/.test(text) && /🏠|rent|apartment|house/.test(text)) return 'Rent'
-  if (/\b(wifi|eero|mesh|internet)\b/.test(text)) return 'Internet'
-  if (/\b(utility|utilities|electric)\b/.test(text)) return 'Utilities'
-  if (/\b(doctor|medical|healthcare|health care|covered california|medi-cal)\b/.test(text)) return 'Healthcare'
-  if (/\b(costco|grocery|groceries|grubs|plant)\b/.test(text)) return 'Groceries'
-  if (/\b(food|pizza|burger|sando|sandwich|chipotle|coffee|cookie|cookies|mj movie)\b/.test(text)) return 'Dining'
+
+  // Rent — month names near housing keywords
+  if (/\b(rent|april|may|june|july|august|september|october|november|december|january|february|march)\b/.test(text) && /🏠|rent|apartment|house|lease/.test(text)) return 'Rent'
+  if (/\b(wifi|eero|mesh|internet|broadband)\b/.test(text)) return 'Internet'
+  if (/\b(utility|utilities|electric|electricity|water bill|sewage|trash|pgne|pg&e)\b/.test(text)) return 'Utilities'
+  if (/\b(insurance|geico|state farm|allstate|progressive)\b/.test(text)) return 'Insurance'
+  if (/\b(doctor|medical|healthcare|health care|covered california|medi-cal|pharmacy|prescription|dental|dentist|therapy|therapist|copay)\b/.test(text)) return 'Healthcare'
+  if (/\b(costco|grocery|groceries|grubs|plant|trader joe|safeway|whole foods|sprouts|aldi|walmart|target)\b/.test(text)) return 'Groceries'
+
+  // Bar / Alcohol — drink emojis, bar/pub/brewery terms
+  if (/🍺|🍻|🍷|🍸|🍹|🥂|🥃|🍾/.test(text)) return 'Bar/ Alcohol'
+  if (/\b(bar|bars|pub|pubs|brewery|breweries|cocktail|cocktails|beer|beers|wine|wines|alcohol|drinks|liquor|club|nightclub|happy hour|margarita|tequila|whiskey|vodka|bourbon|sake|taproom|speakeasy)\b/.test(text)) return 'Bar/ Alcohol'
+
+  // Dining — food-related words, restaurants, cafes
+  if (/🍕|🍔|🌮|🍜|🍣|☕|🧋|🥪|🥗|🍱|🍳|🥘|🍝/.test(text)) return 'Dining'
+  if (/\b(food|pizza|burger|burgers|sando|sandwich|sandwiches|chipotle|coffee|cafe|restaurant|brunch|dinner|lunch|snack|snacks|meal|meals|breakfast|taco|tacos|sushi|ramen|noodles|thai|chinese|indian|mexican|pho|boba|cookie|cookies|pastry|bakery|donut|donuts|diner|grubhub|doordash|uber eats|postmates|falafel|wings|bbq|barbecue|steak|salad|smoothie|juice|gelato|ice cream|dim sum|dumplings|bagel|croissant|pancakes|waffles|mj movie)\b/.test(text)) return 'Dining'
+
+  // Shopping — stores, retail, apparel
+  if (/\b(store|stores|clothes|clothing|apparel|retail|boards|board|shirt|shirts|shoes|flannel|pants|jacket|hat|hoodie|sweater|online|purchase|amazon|target|walmart|etsy|ebay|zara|h&m|uniqlo|nike|adidas|thrift|vintage|mall|outlet|merch|gear|gadget|accessory|accessories|👕|👟|🛒|🛍)\b/.test(text)) return 'Shopping'
+
+  // Entertainment
+  if (/\b(movie|movies|concert|concerts|show|shows|event|events|ticket|tickets|sports|games|game|theater|theatre|festival|rugby|olympic|comedy|museum|bowling|arcade|amusement|zoo|aquarium|exhibition|karaoke)\b/.test(text)) return 'Entertainment'
+
   if (/\b(car rental|rental car)\b/.test(text)) return 'Car Rental'
-  if (/\b(gas|automotive|tesla)\b/.test(text)) return 'Gas/Automotive'
-  if (/\b(uber|lyft|clipper|parking|transit)\b/.test(text)) return 'Transportation'
-  if (/\b(photo|shoot|print|box|camera|film)\b/.test(text)) return 'Business Expenses'
-  if (/\b(board|flannel|shirt|clothes|👕)\b/.test(text)) return 'Shopping'
-  if (/\b(movie|concert|rugby|olympic|travel)\b/.test(text)) return 'Entertainment'
+  if (/\b(gas|gasoline|automotive|tesla|oil change|car wash|mechanic|auto repair)\b/.test(text)) return 'Gas/Automotive'
+  if (/\b(uber|lyft|clipper|parking|transit|bus|train|subway|metro|bart|caltrain|amtrak|taxi|cab|scooter|lime|bird)\b/.test(text)) return 'Transportation'
+  if (/\b(flight|flights|hotel|hotels|airbnb|hostel|resort|vacation|road trip|travel|luggage|passport|cruise)\b/.test(text)) return 'Travel'
+  if (/\b(subscription|spotify|netflix|hulu|disney|youtube|adobe|apple|icloud|patreon|membership|gym)\b/.test(text)) return 'Subscriptions'
+  if (/\b(phone|tmobile|t-mobile|verizon|att|at&t|mint mobile|cell|cellular)\b/.test(text)) return 'Phone'
+  if (/\b(photo|shoot|print|box|camera|film|editing|edit|studio|lens|tripod|lighting|backdrop|client|invoice)\b/.test(text)) return 'Business Expenses'
+
   return 'Uncategorized'
+}
+
+const VENMO_INCOME_KEYWORDS = /\b(photo|photography|editing|edit|photo class|class|teaching|lesson|lessons|tip|tips|shoot)\b/i
+
+export function isVenmoIncomeCandidate(note: string): boolean {
+  return VENMO_INCOME_KEYWORDS.test(note)
 }
 
 function currencyToCents(value: string): number {

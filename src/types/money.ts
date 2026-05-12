@@ -37,6 +37,7 @@ export interface Transaction {
   account_id: number | null
   source: TransactionSource
   notes: string
+  income_candidate: boolean
   created_at: number
   updated_at: number
 }
@@ -217,6 +218,8 @@ export interface MoneyAPI {
   deleteAllTransactions(): Promise<{ deleted: number }>
   importTransactions(filePath: string, accountId: number): Promise<ImportResult>
   getImportedFiles(filters?: { start?: number; end?: number }): Promise<ImportedFileRecord[]>
+  clearImportedFile(fileId: number): Promise<{ transactions: Transaction[] }>
+  clearIncomeCandidateFlags(ids: number[]): Promise<void>
   getPathForFile(file: File): string
 
   getBudgetItems(budgetType?: BudgetType): Promise<BudgetItem[]>

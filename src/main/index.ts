@@ -27,6 +27,8 @@ import {
   getAllExpectedIncomeEntries,
   getAllIncomeEntries,
   getAllTransactions,
+  clearImportedFile,
+  clearIncomeCandidateFlags,
   getImportedFiles,
   getIncomeTaxSettings,
   initDatabase,
@@ -131,6 +133,8 @@ function registerIpcHandlers(): void {
     importTransactionsFromFile(filePath, accountId)
   )
   ipcMain.handle('imports:getAll', (_event, filters?: { start?: number; end?: number }) => getImportedFiles(filters))
+  ipcMain.handle('imports:clear', (_event, fileId: number) => ({ transactions: clearImportedFile(fileId) }))
+  ipcMain.handle('transactions:clearIncomeFlags', (_event, ids: number[]) => clearIncomeCandidateFlags(ids))
 
   ipcMain.handle('budget:getAll', (_event, budgetType?: BudgetType) => getAllBudgetItems(budgetType))
   ipcMain.handle('budgetLines:getAll', () => getAllBudgetLineItems())

@@ -12,14 +12,17 @@ type DisplayPeriod = 'week' | 'month' | 'year'
 type SortKey = 'date' | 'amount' | 'category' | 'recent'
 
 interface UndoAction {
-  type: 'delete_one' | 'delete_all'
+  type: 'delete_one' | 'delete_all' | 'clear_file' | 'clear_all_files' | 'ignore_income' | 'delete_income'
   transactions: Transaction[]
+  files?: ImportedFileRecord[]
+  flaggedIds?: number[]
 }
 
 const ACCOUNT_NAMES = ['Capital One', 'Venmo', 'EBT', 'Chase'] as const
 const IMPORT_COLLAPSED_KEY = 'scoop_import_collapsed'
 const PERIOD_KEY = 'scoop_txn_period'
 const SORT_KEY = 'scoop_txn_sort'
+const ANCHOR_KEY = 'scoop_txn_anchor'
 
 const SORT_OPTIONS: ReadonlyArray<{ id: SortKey; label: string }> = [
   { id: 'date', label: 'Date' },
@@ -68,6 +71,12 @@ function getStoredSort(): SortKey {
   return 'date'
 }
 
+function getStoredAnchor(): Date {
+  const v = localStorage.getItem(ANCHOR_KEY)
+  if (v) { const d = new Date(v); if (!isNaN(d.getTime())) return d }
+  return new Date()
+}
+
 export function Transactions() {
   const { dataVersion, bumpDataVersion } = useAppContext()
   const { getChat } = useChat()
@@ -78,13 +87,16 @@ export function Transactions() {
   const [importedFiles, setImportedFiles] = useState<ImportedFileRecord[]>([])
   const [selectedAccountIds, setSelectedAccountIds] = useState<number[]>([])
   const [selectedCategories, setSelectedCategories] = useState<string[]>([])
-  const [anchor, setAnchor] = useState(() => new Date())
+  const [anchor, setAnchor] = useState(() => getStoredAnchor())
   const [period, setPeriod] = useState<DisplayPeriod>(() => getStoredPeriod())
   const [sortKey, setSortKey] = useState<SortKey>(() => getStoredSort())
   const [sortOpen, setSortOpen] = useState(false)
   const [calendarOpen, setCalendarOpen] = useState(false)
   const [adding, setAdding] = useState(false)
   const [editMode, setEditMode] = useState(false)
+  const [contextMenu, setContextMenu] = useState<{ txId: number; x: number; y: number; confirming?: boolean } | null>(null)
+  const [fileContextMenu, setFileContextMenu] = useState<{ fileId: number; x: number; y: number } | null>(null)
+  const [inlineEditTxId, setInlineEditTxId] = useState<number | null>(null)
   const [deleteAllArmed, setDeleteAllArmed] = useState(false)
   const [error, setError] = useState('')
   const [importCollapsed, setImportCollapsed] = useState(() => localStorage.getItem(IMPORT_COLLAPSED_KEY) === 'true')
@@ -104,6 +116,7 @@ export function Transactions() {
   useEffect(() => { localStorage.setItem(IMPORT_COLLAPSED_KEY, String(importCollapsed)) }, [importCollapsed])
   useEffect(() => { localStorage.setItem(PERIOD_KEY, period) }, [period])
   useEffect(() => { localStorage.setItem(SORT_KEY, sortKey) }, [sortKey])
+  useEffect(() => { localStorage.setItem(ANCHOR_KEY, anchor.toISOString()) }, [anchor])
 
   useEffect(() => {
     if (!sortOpen) return
@@ -113,6 +126,24 @@ export function Transactions() {
     document.addEventListener('keydown', onEsc)
     return () => { document.removeEventListener('pointerdown', onClickAway); document.removeEventListener('keydown', onEsc) }
   }, [sortOpen])
+
+  useEffect(() => {
+    if (!contextMenu) return
+    const close = () => setContextMenu(null)
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close() }
+    document.addEventListener('pointerdown', close)
+    document.addEventListener('keydown', onKey)
+    return () => { document.removeEventListener('pointerdown', close); document.removeEventListener('keydown', onKey) }
+  }, [contextMenu])
+
+  useEffect(() => {
+    if (!fileContextMenu) return
+    const close = () => setFileContextMenu(null)
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close() }
+    document.addEventListener('pointerdown', close)
+    document.addEventListener('keydown', onKey)
+    return () => { document.removeEventListener('pointerdown', close); document.removeEventListener('keydown', onKey) }
+  }, [fileContextMenu])
 
   useEffect(() => {
     if (!calendarOpen) return
@@ -191,16 +222,26 @@ export function Transactions() {
     const action = undoStackRef.current.pop()
     if (!action) return
     if (undoStackRef.current.length === 0) setHasUndoActions(false)
-    for (const tx of action.transactions) {
-      await window.api.createTransaction({
-        date: tx.date,
-        description: tx.description,
-        amount: tx.amount,
-        mapped_category: tx.mapped_category,
-        raw_category: tx.raw_category ?? tx.mapped_category,
-        account_id: tx.account_id ?? null,
-        source: tx.source ?? 'manual'
-      })
+    if (action.type === 'ignore_income' && action.flaggedIds?.length) {
+      for (const id of action.flaggedIds) {
+        await window.api.updateTransaction(id, { income_candidate: true })
+      }
+    } else if (action.type === 'delete_income') {
+      for (const tx of action.transactions) {
+        await window.api.createTransaction({
+          date: tx.date, description: tx.description, amount: tx.amount,
+          mapped_category: tx.mapped_category, raw_category: tx.raw_category ?? tx.mapped_category,
+          account_id: tx.account_id ?? null, source: tx.source ?? 'manual', income_candidate: true
+        })
+      }
+    } else {
+      for (const tx of action.transactions) {
+        await window.api.createTransaction({
+          date: tx.date, description: tx.description, amount: tx.amount,
+          mapped_category: tx.mapped_category, raw_category: tx.raw_category ?? tx.mapped_category,
+          account_id: tx.account_id ?? null, source: tx.source ?? 'manual'
+        })
+      }
     }
     bumpDataVersion()
   }, [bumpDataVersion])
@@ -254,6 +295,50 @@ export function Transactions() {
       await window.api.deleteTransaction(tx.id)
     }
     setDeleteAllArmed(false)
+    bumpDataVersion()
+  }
+
+  async function clearImportedFile(fileId: number): Promise<void> {
+    const file = importedFiles.find((f) => f.id === fileId)
+    if (!file) return
+    const result = await window.api.clearImportedFile(fileId)
+    pushUndo({ type: 'clear_file', transactions: result.transactions, files: [file] })
+    bumpDataVersion()
+  }
+
+  async function clearAllImportedFiles(): Promise<void> {
+    const allTx: Transaction[] = []
+    const allFiles: ImportedFileRecord[] = [...importedFiles]
+    for (const file of importedFiles) {
+      const result = await window.api.clearImportedFile(file.id)
+      allTx.push(...result.transactions)
+    }
+    if (allFiles.length > 0) {
+      pushUndo({ type: 'clear_all_files', transactions: allTx, files: allFiles })
+    }
+    bumpDataVersion()
+  }
+
+  const incomeFlaggedTx = useMemo(
+    () => sortedTransactions.filter((tx) => tx.income_candidate),
+    [sortedTransactions]
+  )
+
+  async function ignoreIncomeFlags(): Promise<void> {
+    const ids = incomeFlaggedTx.map((tx) => tx.id)
+    if (ids.length === 0) return
+    await window.api.clearIncomeCandidateFlags(ids)
+    pushUndo({ type: 'ignore_income', transactions: [], flaggedIds: ids })
+    bumpDataVersion()
+  }
+
+  async function deleteIncomeTransactions(): Promise<void> {
+    const toDelete = [...incomeFlaggedTx]
+    if (toDelete.length === 0) return
+    pushUndo({ type: 'delete_income', transactions: toDelete })
+    for (const tx of toDelete) {
+      await window.api.deleteTransaction(tx.id)
+    }
     bumpDataVersion()
   }
 
@@ -334,7 +419,7 @@ export function Transactions() {
                     <span className="text-[12px] text-zinc-500 dark:text-zinc-400">No files for this month</span>
                   ) : (
                     <div className="flex flex-col gap-1">
-                      {importedFiles.map((file) => <ImportedFileEntry key={file.id} file={file} formatDate={formatDate} />)}
+                      {importedFiles.map((file) => <ImportedFileEntry key={file.id} file={file} formatDate={formatDate} onContextMenu={(e) => { e.preventDefault(); setFileContextMenu({ fileId: file.id, x: e.clientX, y: e.clientY }) }} />)}
                     </div>
                   )}
                 </div>
@@ -345,6 +430,21 @@ export function Transactions() {
             <CollapseChevron collapsed={importCollapsed} />
           </button>
         </div>
+
+        {fileContextMenu && (
+          <div
+            className="fixed z-[100] min-w-[130px] overflow-hidden rounded-lg border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900"
+            style={{ left: fileContextMenu.x, top: fileContextMenu.y }}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <button type="button" onClick={async () => { await clearImportedFile(fileContextMenu.fileId); setFileContextMenu(null) }} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-zinc-700 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-800">
+              <XIcon />Clear
+            </button>
+            <button type="button" onClick={async () => { await clearAllImportedFiles(); setFileContextMenu(null) }} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30">
+              <XIcon />Clear All
+            </button>
+          </div>
+        )}
 
         {/* Grid: filter rail + transactions list */}
         <div className="md:grid md:grid-cols-[auto_minmax(0,1fr)] md:items-start md:gap-x-4">
@@ -386,10 +486,11 @@ export function Transactions() {
 
             {error ? <div className="mb-2 text-[12px] text-red-600 dark:text-red-400">{error}</div> : null}
             <section className="overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
-              <div className="grid grid-cols-[110px_1fr_170px_120px_24px] items-center gap-3 border-b border-zinc-100 bg-zinc-50/80 px-4 py-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950/50 dark:text-zinc-400">
+              <div className="grid grid-cols-[90px_1fr_130px_80px_100px_48px] items-center gap-2 border-b border-zinc-100 bg-zinc-50/80 px-4 py-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950/50 dark:text-zinc-400">
                 <div>Date</div>
                 <div>Description</div>
                 <div>Category</div>
+                <div>Account</div>
                 <div className="text-right">Amount</div>
                 <div aria-hidden="true" />
               </div>
@@ -398,10 +499,57 @@ export function Transactions() {
                 <div className="px-4 py-10 text-center text-sm text-zinc-500 dark:text-zinc-400">No transactions for this period — use the controls above or import a CSV</div>
               ) : (
                 sortedTransactions.map((tx) => (
-                  <TransactionRow key={tx.id} transaction={tx} editMode={editMode} onChanged={bumpDataVersion} onDelete={() => deleteTransaction(tx.id)} />
+                  <TransactionRow
+                    key={tx.id}
+                    transaction={tx}
+                    accounts={accounts}
+                    categories={categories}
+                    editMode={editMode}
+                    inlineEdit={inlineEditTxId === tx.id}
+                    onChanged={bumpDataVersion}
+                    onDelete={() => deleteTransaction(tx.id)}
+                    onStartEdit={() => setInlineEditTxId(tx.id)}
+                    onCancelInlineEdit={() => setInlineEditTxId(null)}
+                    onContextMenu={(e) => { e.preventDefault(); setContextMenu({ txId: tx.id, x: e.clientX, y: e.clientY }) }}
+                  />
                 ))
               )}
+              {incomeFlaggedTx.length > 0 && (
+                <div className="flex items-center justify-between gap-3 border-t border-zinc-100 px-4 py-2.5 dark:border-zinc-800">
+                  <span className="text-[12px] font-medium text-zinc-600 dark:text-zinc-300">
+                    Delete all Venmo income? <span className="text-[11px] font-normal text-zinc-400 dark:text-zinc-500">({incomeFlaggedTx.length} flagged)</span>
+                  </span>
+                  <div className="flex items-center gap-1">
+                    <button type="button" onClick={() => void ignoreIncomeFlags()} aria-label="Ignore income flags" className="inline-flex h-6 w-6 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"><XIcon /></button>
+                    <button type="button" onClick={() => void deleteIncomeTransactions()} aria-label="Delete income transactions" className="inline-flex h-6 w-6 items-center justify-center rounded-full text-emerald-600 transition-colors hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-950/30"><CheckIcon /></button>
+                  </div>
+                </div>
+              )}
             </section>
+
+            {contextMenu && (
+              <div
+                className="fixed z-[100] min-w-[120px] overflow-hidden rounded-lg border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900"
+                style={{ left: contextMenu.x, top: contextMenu.y }}
+                onPointerDown={(e) => e.stopPropagation()}
+              >
+                {contextMenu.confirming ? (
+                  <>
+                    <button type="button" onClick={async () => { await deleteTransaction(contextMenu.txId); setContextMenu(null) }} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30">Delete</button>
+                    <button type="button" onClick={() => setContextMenu(null)} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-zinc-500 hover:bg-zinc-50 dark:text-zinc-400 dark:hover:bg-zinc-800">Cancel</button>
+                  </>
+                ) : (
+                  <>
+                    <button type="button" onClick={() => { setInlineEditTxId(contextMenu.txId); setContextMenu(null) }} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-zinc-700 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-800">
+                      <PencilIcon />Edit
+                    </button>
+                    <button type="button" onClick={() => setContextMenu({ ...contextMenu, confirming: true })} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30">
+                      <XIcon />Delete
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -610,9 +758,9 @@ function FilterPill({ label, active, tone, onClick }: { label: string; active: b
 // Import section helpers
 // ---------------------------------------------------------------------------
 
-function ImportedFileEntry({ file, formatDate }: { file: ImportedFileRecord; formatDate: (unix: number) => string }) {
+function ImportedFileEntry({ file, formatDate, onContextMenu }: { file: ImportedFileRecord; formatDate: (unix: number) => string; onContextMenu: (e: React.MouseEvent) => void }) {
   return (
-    <div className="relative flex items-start justify-end gap-2" style={{ overflow: 'visible' }}>
+    <div className="relative flex items-start justify-end gap-2" style={{ overflow: 'visible' }} onContextMenu={onContextMenu}>
       <div className="group/file min-w-0 text-right">
         <span className="block text-[12px] font-medium text-zinc-700 dark:text-zinc-200">{file.file_name}</span>
         <span className="block text-[10px] text-zinc-400 dark:text-zinc-500">{formatFileSize(file.file_size)} · {file.imported_count} imported · {formatImportSpan(file, formatDate)}</span>
@@ -681,38 +829,191 @@ function formatImportSpan(file: ImportedFileRecord, formatDate: (unix: number) =
 // Transaction rows
 // ---------------------------------------------------------------------------
 
-function TransactionRow({ transaction, editMode, onChanged, onDelete }: { transaction: Transaction; editMode: boolean; onChanged: () => void; onDelete: () => Promise<void> }) {
-  const [editing, setEditing] = useState<'description' | 'category' | null>(null)
+function TransactionRow({ transaction, accounts, categories, editMode, inlineEdit, onChanged, onDelete, onStartEdit, onCancelInlineEdit, onContextMenu }: {
+  transaction: Transaction; accounts: Account[]; categories: string[]; editMode: boolean; inlineEdit: boolean;
+  onChanged: () => void; onDelete: () => Promise<void>; onStartEdit: () => void; onCancelInlineEdit: () => void; onContextMenu: (e: React.MouseEvent) => void
+}) {
   const [description, setDescription] = useState(transaction.description)
   const [category, setCategory] = useState(transaction.mapped_category)
+  const [amount, setAmount] = useState(formatCurrency(transaction.amount))
+  const [accountId, setAccountId] = useState(transaction.account_id)
   const { formatDate } = useDateFormat()
 
+  const accountName = useMemo(() => {
+    if (!transaction.account_id) return ''
+    const acct = accounts.find((a) => a.id === transaction.account_id)
+    return acct?.name ?? ''
+  }, [accounts, transaction.account_id])
+
+  useEffect(() => {
+    setDescription(transaction.description)
+    setCategory(transaction.mapped_category)
+    setAmount(formatCurrency(transaction.amount))
+    setAccountId(transaction.account_id)
+  }, [transaction])
+
   async function save(): Promise<void> {
-    await window.api.updateTransaction(transaction.id, { description, mapped_category: category })
-    setEditing(null)
+    const parsed = parseCurrencyInput(amount)
+    await window.api.updateTransaction(transaction.id, {
+      description,
+      mapped_category: category,
+      amount: parsed ?? transaction.amount,
+      account_id: accountId
+    })
+    onCancelInlineEdit()
     onChanged()
   }
 
+  function handleKeyDown(e: React.KeyboardEvent): void {
+    if (e.key === 'Enter') void save()
+    if (e.key === 'Escape') {
+      setDescription(transaction.description)
+      setCategory(transaction.mapped_category)
+      setAmount(formatCurrency(transaction.amount))
+      setAccountId(transaction.account_id)
+      onCancelInlineEdit()
+    }
+  }
+
+  if (inlineEdit) {
+    return (
+      <div className="group/row grid grid-cols-[90px_1fr_130px_80px_100px_48px] items-center gap-2 border-b border-zinc-100 px-4 py-2 text-sm last:border-b-0 dark:border-zinc-800" onContextMenu={onContextMenu}>
+        <div className="text-zinc-500 dark:text-zinc-400">{formatDate(transaction.date)}</div>
+        <input autoFocus value={description} onChange={(e) => setDescription(e.target.value)} onKeyDown={handleKeyDown} className="min-w-0 rounded bg-zinc-50 px-1.5 py-0.5 text-sm outline-none ring-1 ring-zinc-200 dark:bg-zinc-800 dark:ring-zinc-700" />
+        <InlineEditCategoryInput value={category} categories={categories} onChange={setCategory} onKeyDown={handleKeyDown} />
+        <InlineEditAccountDropdown value={accountId} accounts={accounts} onChange={setAccountId} />
+        <input value={amount} onChange={(e) => setAmount(e.target.value)} onKeyDown={handleKeyDown} className="min-w-0 rounded bg-zinc-50 px-1.5 py-0.5 text-right text-sm outline-none ring-1 ring-zinc-200 dark:bg-zinc-800 dark:ring-zinc-700" />
+        <button type="button" onClick={() => void save()} className="inline-flex h-6 w-6 items-center justify-center rounded-full text-emerald-600 transition-colors hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-950/30" aria-label="Confirm edit"><CheckIcon /></button>
+      </div>
+    )
+  }
+
   return (
-    <div className="group/row grid grid-cols-[110px_1fr_170px_120px_24px] items-center gap-3 border-b border-zinc-100 px-4 py-3 text-sm last:border-b-0 dark:border-zinc-800">
+    <div className="group/row grid grid-cols-[90px_1fr_130px_80px_100px_48px] items-center gap-2 border-b border-zinc-100 px-4 py-3 text-sm last:border-b-0 dark:border-zinc-800" onContextMenu={onContextMenu}>
       <div className="text-zinc-500 dark:text-zinc-400">{formatDate(transaction.date)}</div>
-      {editing === 'description' ? (
-        <input autoFocus value={description} onChange={(e) => setDescription(e.target.value)} onBlur={save} onKeyDown={(e) => { if (e.key === 'Enter') void save(); if (e.key === 'Escape') setEditing(null) }} className="bg-transparent outline-none" />
-      ) : (
-        <button type="button" onDoubleClick={() => setEditing('description')} className="truncate text-left text-zinc-900 dark:text-zinc-100">{transaction.description || 'Untitled'}</button>
-      )}
-      {editing === 'category' ? (
-        <input autoFocus value={category} onChange={(e) => setCategory(e.target.value)} onBlur={save} onKeyDown={(e) => { if (e.key === 'Enter') void save(); if (e.key === 'Escape') setEditing(null) }} className="bg-transparent outline-none" />
-      ) : (
-        <button type="button" onDoubleClick={() => setEditing('category')} className="truncate text-left text-zinc-500 dark:text-zinc-400">{transaction.mapped_category || 'Uncategorized'}</button>
-      )}
+      <div className="flex min-w-0 items-center gap-1.5">
+        <span className="truncate text-zinc-900 dark:text-zinc-100">{transaction.description || 'Untitled'}</span>
+        {transaction.income_candidate && <span className="shrink-0 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-700 ring-1 ring-inset ring-emerald-200 dark:bg-emerald-950/30 dark:text-emerald-300 dark:ring-emerald-900">Income?</span>}
+      </div>
+      <div className="truncate text-zinc-500 dark:text-zinc-400">{transaction.mapped_category || 'Uncategorized'}</div>
+      <div className="truncate text-[11px] text-zinc-400 dark:text-zinc-500">{accountName}</div>
       <div className={`text-right font-medium ${transaction.amount < 0 ? 'text-red-600' : 'text-emerald-600'}`}>{formatCurrency(transaction.amount)}</div>
       {editMode ? (
-        <button type="button" onClick={() => void onDelete()} aria-label={`Delete ${transaction.description || 'transaction'}`} className="inline-flex h-6 w-6 items-center justify-center rounded-full text-zinc-300 transition-colors hover:bg-red-50 hover:text-red-600 dark:text-zinc-600 dark:hover:bg-red-950/30 dark:hover:text-red-300">
-          <XIcon />
-        </button>
+        <div className="flex items-center gap-0.5">
+          <button type="button" onClick={() => onStartEdit()} aria-label="Edit" className="inline-flex h-6 w-6 items-center justify-center rounded-full text-zinc-300 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-200">
+            <PencilIcon />
+          </button>
+          <button type="button" onClick={() => void onDelete()} aria-label={`Delete ${transaction.description || 'transaction'}`} className="inline-flex h-6 w-6 items-center justify-center rounded-full text-zinc-300 transition-colors hover:bg-red-50 hover:text-red-600 dark:text-zinc-600 dark:hover:bg-red-950/30 dark:hover:text-red-300">
+            <XIcon />
+          </button>
+        </div>
       ) : (
         <span />
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Inline account dropdown (replaces native select)
+// ---------------------------------------------------------------------------
+
+function InlineEditAccountDropdown({ value, accounts, onChange }: {
+  value: number | null; accounts: Account[]; onChange: (id: number | null) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  const selected = accounts.find((a) => a.id === value)
+
+  useEffect(() => {
+    if (!open) return
+    const close = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false) }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('pointerdown', close)
+    document.addEventListener('keydown', onKey)
+    return () => { document.removeEventListener('pointerdown', close); document.removeEventListener('keydown', onKey) }
+  }, [open])
+
+  return (
+    <div ref={ref} className="relative min-w-0">
+      <button type="button" onClick={() => setOpen((v) => !v)} className="w-full min-w-0 truncate rounded bg-zinc-50 px-1.5 py-0.5 text-left text-[11px] ring-1 ring-zinc-200 dark:bg-zinc-800 dark:ring-zinc-700">
+        {selected?.name || '—'}
+      </button>
+      {open && (
+        <div className="absolute left-0 top-full z-40 mt-1 min-w-[120px] overflow-hidden rounded-lg border border-zinc-200 bg-white p-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
+          <button type="button" onMouseDown={(e) => { e.preventDefault(); onChange(null); setOpen(false) }} className="flex w-full rounded-md px-2.5 py-1.5 text-left text-[11px] font-medium text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-950">—</button>
+          {accounts.map((a) => (
+            <button key={a.id} type="button" onMouseDown={(e) => { e.preventDefault(); onChange(a.id); setOpen(false) }} className={`flex w-full rounded-md px-2.5 py-1.5 text-left text-[11px] font-medium transition-colors ${a.id === value ? 'bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100' : 'text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-950'}`}>
+              {a.name}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Inline searchable category dropdown (used in edit mode)
+// ---------------------------------------------------------------------------
+
+function InlineEditCategoryInput({ value, categories, onChange, onKeyDown }: {
+  value: string; categories: string[]; onChange: (v: string) => void; onKeyDown: (e: React.KeyboardEvent) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [highlightIdx, setHighlightIdx] = useState(0)
+  const dropdownRef = useRef<HTMLDivElement>(null)
+
+  const filtered = useMemo(() => {
+    if (!value.trim()) return categories
+    const lower = value.toLowerCase()
+    return categories.filter((c) => c.toLowerCase().includes(lower))
+  }, [categories, value])
+
+  useEffect(() => { setHighlightIdx(0) }, [filtered])
+  useEffect(() => {
+    if (!open || !dropdownRef.current) return
+    const el = dropdownRef.current.children[highlightIdx] as HTMLElement | undefined
+    el?.scrollIntoView({ block: 'nearest' })
+  }, [highlightIdx, open])
+
+  function handleKey(e: React.KeyboardEvent): void {
+    if (e.key === 'Escape') { setOpen(false); onKeyDown(e); return }
+    if (!open) { if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { setOpen(true); return } onKeyDown(e); return }
+    if (e.key === 'ArrowDown') { e.preventDefault(); setHighlightIdx((i) => Math.min(i + 1, filtered.length - 1)); return }
+    if (e.key === 'ArrowUp') { e.preventDefault(); setHighlightIdx((i) => Math.max(i - 1, 0)); return }
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      if (filtered[highlightIdx]) onChange(filtered[highlightIdx])
+      setOpen(false)
+      return
+    }
+    onKeyDown(e)
+  }
+
+  return (
+    <div className="relative min-w-0">
+      <input
+        value={value}
+        onChange={(e) => { onChange(e.target.value); setOpen(true) }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => { window.setTimeout(() => setOpen(false), 150) }}
+        onKeyDown={handleKey}
+        className="w-full min-w-0 rounded bg-zinc-50 px-1.5 py-0.5 text-sm outline-none ring-1 ring-zinc-200 dark:bg-zinc-800 dark:ring-zinc-700"
+      />
+      {open && filtered.length > 0 && (
+        <div ref={dropdownRef} className="absolute left-0 top-full z-40 mt-1 max-h-[180px] w-[200px] overflow-y-auto rounded-lg border border-zinc-200 bg-white p-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
+          {filtered.map((cat, i) => (
+            <button
+              key={cat}
+              type="button"
+              onMouseDown={(e) => { e.preventDefault(); onChange(cat); setOpen(false) }}
+              className={`flex w-full rounded-md px-2.5 py-1.5 text-left text-[12px] font-medium transition-colors ${i === highlightIdx ? 'bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100' : 'text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-950'}`}
+            >
+              {cat}
+            </button>
+          ))}
+        </div>
       )}
     </div>
   )
@@ -777,7 +1078,7 @@ function AddTransactionRow({ accounts, categories, onDone }: { accounts: Account
   }
 
   return (
-    <div className="relative grid grid-cols-[110px_1fr_170px_120px_24px] items-center gap-3 border-b border-zinc-100 bg-zinc-50 px-4 py-3 text-sm dark:border-zinc-800 dark:bg-zinc-950">
+    <div className="relative grid grid-cols-[90px_1fr_130px_80px_100px_48px] items-center gap-2 border-b border-zinc-100 bg-zinc-50 px-4 py-3 text-sm dark:border-zinc-800 dark:bg-zinc-950">
       <div className="text-zinc-500">Today</div>
       <input autoFocus value={description} onChange={(e) => setDescription(e.target.value)} onKeyDown={(e) => { if (e.key === 'Escape') handleEsc(); if (e.key === 'Enter') catInputRef.current?.focus() }} placeholder="Description" className="bg-transparent outline-none" />
       <div className="relative">
@@ -806,6 +1107,7 @@ function AddTransactionRow({ accounts, categories, onDone }: { accounts: Account
           </div>
         )}
       </div>
+      <div />
       <input value={amount} onChange={(e) => setAmount(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void create(); if (e.key === 'Escape') handleEsc() }} placeholder="$0.00" className="bg-transparent text-right outline-none" />
       <button type="button" onClick={() => void create()} className="inline-flex h-6 w-6 items-center justify-center rounded-full text-emerald-600 transition-colors hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-950/30" aria-label="Confirm"><CheckIcon /></button>
     </div>

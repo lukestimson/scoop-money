@@ -13,6 +13,7 @@ export function Settings() {
       <div className="mt-5 space-y-5">
         <DisplaySection />
         <RulesSection />
+        <ImportRulesFramework />
         <BudgetCategoriesSection />
         <AccountsSection />
         <AiModelSection />
@@ -87,6 +88,125 @@ function RulesSection() {
         <button type="button" onClick={async () => { await window.api.recategorizeAllTransactions(); bumpDataVersion(); }} className="rounded-full bg-zinc-900 px-3 py-1.5 text-[12px] font-medium text-white dark:bg-zinc-100 dark:text-zinc-950">Re-categorize All Transactions</button>
       </div>
     </Panel>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Import rules framework
+// ---------------------------------------------------------------------------
+
+const VENMO_CATEGORY_RULES: ReadonlyArray<{ pattern: string; category: string }> = [
+  { pattern: 'Rent keywords + 🏠 / housing terms', category: 'Rent' },
+  { pattern: 'wifi, eero, internet, broadband', category: 'Internet' },
+  { pattern: 'utility, electric, water, PG&E', category: 'Utilities' },
+  { pattern: 'insurance, geico, state farm', category: 'Insurance' },
+  { pattern: 'doctor, pharmacy, dental, therapy', category: 'Healthcare' },
+  { pattern: 'costco, grocery, trader joe, safeway', category: 'Groceries' },
+  { pattern: '🍺🍷🍸 emojis, bar, pub, brewery, cocktail, beer, wine', category: 'Bar/ Alcohol' },
+  { pattern: '🍕🍔☕ emojis, food, restaurant, cafe, brunch, pizza, sushi', category: 'Dining' },
+  { pattern: 'stores, clothes, shoes, retail, amazon, boards', category: 'Shopping' },
+  { pattern: 'movie, concert, ticket, sports, theater, festival', category: 'Entertainment' },
+  { pattern: 'gas, automotive, tesla, car wash', category: 'Gas/Automotive' },
+  { pattern: 'uber, lyft, parking, transit, bart, train', category: 'Transportation' },
+  { pattern: 'flight, hotel, airbnb, vacation, travel', category: 'Travel' },
+  { pattern: 'subscription, spotify, netflix, gym', category: 'Subscriptions' },
+  { pattern: 'phone, tmobile, verizon, mint mobile', category: 'Phone' },
+  { pattern: 'photo, camera, studio, client, invoice', category: 'Business Expenses' }
+]
+
+const VENMO_INCOME_TERMS = 'photo, photography, editing, edit, photo class, class, teaching, lesson, lessons, tip, tips, shoot'
+
+function ImportRulesFramework() {
+  const [venmoOpen, setVenmoOpen] = useState(false)
+  const [creditOpen, setCreditOpen] = useState(false)
+  const [checkingOpen, setCheckingOpen] = useState(false)
+  const [savingsOpen, setSavingsOpen] = useState(false)
+  const [incomeOpen, setIncomeOpen] = useState(false)
+
+  return (
+    <Panel title="Import Rules">
+      {/* Venmo */}
+      <CollapsibleRuleSection title="Venmo Import CSV Rules" subtitle="Deterministic category matching from Venmo note/description" open={venmoOpen} onToggle={() => setVenmoOpen((v) => !v)}>
+        <div className="space-y-3">
+          <div>
+            <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400">Category detection</p>
+            <p className="mt-1 text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">When a Venmo CSV is imported, each row&apos;s note is scanned against these keyword patterns. The first match wins.</p>
+            <div className="mt-2 space-y-1">
+              {VENMO_CATEGORY_RULES.map((rule) => (
+                <div key={rule.category} className="flex items-start gap-2 rounded-md bg-zinc-50 px-2.5 py-1.5 dark:bg-zinc-950">
+                  <span className="shrink-0 rounded-full bg-zinc-100 px-2 py-0.5 text-[10px] font-semibold text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200">{rule.category}</span>
+                  <span className="text-[11px] text-zinc-500 dark:text-zinc-400">{rule.pattern}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="border-t border-zinc-100 pt-3 dark:border-zinc-800">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400">Income candidate detection</p>
+            <p className="mt-1 text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
+              Positive-amount Venmo transactions whose note matches any of these terms are flagged with a green &ldquo;Income?&rdquo; chip on the Transactions page for manual review.
+            </p>
+            <div className="mt-1.5 rounded-md bg-emerald-50 px-2.5 py-1.5 text-[11px] font-medium text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-300">
+              {VENMO_INCOME_TERMS}
+            </div>
+          </div>
+        </div>
+      </CollapsibleRuleSection>
+
+      {/* Credit Cards */}
+      <CollapsibleRuleSection title="Credit Card Import Rules" subtitle="Capital One auto-detection; debit → negative, credit → positive" open={creditOpen} onToggle={() => setCreditOpen((v) => !v)}>
+        <p className="text-[11px] text-zinc-500 dark:text-zinc-400">Capital One CSVs are detected by column headers (Transaction Date, Posted Date, Card No., Debit, Credit). Autopay rows are skipped. Category mapping uses the bank&apos;s raw category field.</p>
+      </CollapsibleRuleSection>
+
+      {/* Checking */}
+      <CollapsibleRuleSection title="Checking Account Rules" subtitle="Chase and other checking account imports" open={checkingOpen} onToggle={() => setCheckingOpen((v) => !v)}>
+        <p className="text-[11px] text-zinc-400 dark:text-zinc-500">No custom rules yet. Imported transactions use the generic category mapping rules above.</p>
+      </CollapsibleRuleSection>
+
+      {/* Savings */}
+      <CollapsibleRuleSection title="Savings Account Rules" subtitle="Savings account import handling" open={savingsOpen} onToggle={() => setSavingsOpen((v) => !v)}>
+        <p className="text-[11px] text-zinc-400 dark:text-zinc-500">No custom rules yet. Imported transactions use the generic category mapping rules above.</p>
+      </CollapsibleRuleSection>
+
+      {/* Income */}
+      <CollapsibleRuleSection title="Income Rules" subtitle="Actual income import and expected income / tax assumptions" open={incomeOpen} onToggle={() => setIncomeOpen((v) => !v)}>
+        <div className="space-y-2">
+          <div>
+            <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400">Actual income import</p>
+            <p className="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400">Income entries are created via the Income page AI chat. The AI prompt is configurable in the &ldquo;AI Backend Prompts&rdquo; section below (Income Actual system prompt).</p>
+          </div>
+          <div>
+            <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400">Expected income &amp; tax</p>
+            <p className="mt-1 text-[11px] text-zinc-400 dark:text-zinc-500">Tax assumptions and expected income rules are managed on the Income page. No import-level rules are configured here.</p>
+          </div>
+        </div>
+      </CollapsibleRuleSection>
+    </Panel>
+  )
+}
+
+function CollapsibleRuleSection({ title, subtitle, open, onToggle, children }: {
+  title: string; subtitle: string; open: boolean; onToggle: () => void; children: React.ReactNode
+}) {
+  return (
+    <div className="mb-2 last:mb-0">
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        className="flex w-full items-center justify-between gap-2 rounded-lg border border-zinc-200/80 bg-zinc-50/80 px-3 py-2 text-left transition-colors hover:bg-zinc-100/90 dark:border-zinc-700/80 dark:bg-zinc-950/60 dark:hover:bg-zinc-800/55"
+      >
+        <span>
+          <span className="block text-[11px] font-semibold text-zinc-700 dark:text-zinc-200">{title}</span>
+          <span className="mt-0.5 block text-[11px] text-zinc-500 dark:text-zinc-400">{subtitle}</span>
+        </span>
+        <SettingsChevronIcon expanded={open} />
+      </button>
+      {open && (
+        <div className="mt-1.5 rounded-lg border border-zinc-100 bg-white/60 px-3 py-3 dark:border-zinc-700/80 dark:bg-zinc-950/40">
+          {children}
+        </div>
+      )}
+    </div>
   )
 }
 
