@@ -20,6 +20,8 @@ const api: MoneyAPI = {
   deleteAllTransactions: () => ipcRenderer.invoke('transactions:deleteAll'),
   importTransactions: (filePath, accountId) => ipcRenderer.invoke('transactions:import', filePath, accountId),
   getImportedFiles: (filters) => ipcRenderer.invoke('imports:getAll', filters),
+  clearImportedFile: (fileId) => ipcRenderer.invoke('imports:clear', fileId),
+  clearIncomeCandidateFlags: (ids) => ipcRenderer.invoke('transactions:clearIncomeFlags', ids),
   getPathForFile: (file) => webUtils.getPathForFile(file),
 
   getBudgetItems: (budgetType?: BudgetType) => ipcRenderer.invoke('budget:getAll', budgetType),

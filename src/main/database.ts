@@ -652,6 +652,7 @@ export function initDatabase(userDataPath: string): void {
   database.exec(CREATE_APP_META)
   database.exec(CREATE_CATEGORY_MAPPING_RULES)
   ensureBudgetLineItemsHasIsNeedColumn()
+  ensureTransactionsHasIncomeCandidateColumn()
   seedDefaults()
   runMoneyBudgetAllowlistMigration()
   runBudgetLineNeedWorkbookMigration()
@@ -838,6 +839,13 @@ function budgetLineItemsHasIsNeedColumn(db: Database.Database): boolean {
   return rows.some((row) => row.name === 'is_need')
 }
 
+function ensureTransactionsHasIncomeCandidateColumn(): void {
+  const db = getDb()
+  const cols = db.prepare('PRAGMA table_info(transactions)').all() as { name: string }[]
+  if (cols.some((c) => c.name === 'income_candidate')) return
+  db.exec('ALTER TABLE transactions ADD COLUMN income_candidate INTEGER NOT NULL DEFAULT 0')
+}
+
 function ensureBudgetLineItemsHasIsNeedColumn(): void {
   const db = getDb()
   if (budgetLineItemsHasIsNeedColumn(db)) return
@@ -972,6 +980,7 @@ function rowToTransaction(row: unknown): Transaction {
     account_id: r.account_id === null || r.account_id === undefined ? null : Number(r.account_id),
     source: parseSource(r.source),
     notes: String(r.notes ?? ''),
+    income_candidate: Boolean(r.income_candidate),
     created_at: Number(r.created_at ?? 0),
     updated_at: Number(r.updated_at ?? 0)
   }
@@ -1179,6 +1188,34 @@ export function recordImportedFile(data: {
   return rowToImportedFile(row)
 }
 
+export function clearImportedFile(fileId: number): Transaction[] {
+  const fileRow = getDb().prepare('SELECT * FROM imported_files WHERE id = ?').get(fileId)
+  if (!fileRow) return []
+  const file = rowToImportedFile(fileRow)
+  let affected: Transaction[] = []
+  if (file.first_transaction_date && file.last_transaction_date && file.account_id) {
+    affected = getDb()
+      .prepare(
+        `SELECT * FROM transactions WHERE source = 'csv_import' AND account_id = ? AND date >= ? AND date <= ?`
+      )
+      .all(file.account_id, file.first_transaction_date, file.last_transaction_date)
+      .map(rowToTransaction)
+    getDb()
+      .prepare(
+        `DELETE FROM transactions WHERE source = 'csv_import' AND account_id = ? AND date >= ? AND date <= ?`
+      )
+      .run(file.account_id, file.first_transaction_date, file.last_transaction_date)
+  }
+  getDb().prepare('DELETE FROM imported_files WHERE id = ?').run(fileId)
+  return affected
+}
+
+export function clearIncomeCandidateFlags(ids: number[]): void {
+  if (ids.length === 0) return
+  const placeholders = ids.map(() => '?').join(',')
+  getDb().prepare(`UPDATE transactions SET income_candidate = 0 WHERE id IN (${placeholders})`).run(...ids)
+}
+
 export function transactionExists(date: number, description: string, amount: number): boolean {
   const rows = getDb()
     .prepare('SELECT description FROM transactions WHERE date = ? AND amount = ?')
@@ -1197,10 +1234,10 @@ export function createTransaction(data: Partial<Transaction>): Transaction {
   const result = getDb()
     .prepare(
       `INSERT INTO transactions
-       (date, description, amount, raw_category, mapped_category, account_id, source, notes, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       (date, description, amount, raw_category, mapped_category, account_id, source, notes, income_candidate, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(date, description, amount, raw, mapped, data.account_id ?? null, data.source ?? 'manual', data.notes ?? '', stamp, stamp)
+    .run(date, description, amount, raw, mapped, data.account_id ?? null, data.source ?? 'manual', data.notes ?? '', data.income_candidate ? 1 : 0, stamp, stamp)
   return getTransactionById(Number(result.lastInsertRowid))
 }
 
@@ -1214,7 +1251,7 @@ export function updateTransaction(id: number, data: Partial<Transaction>): Trans
     .prepare(
       `UPDATE transactions
        SET date = ?, description = ?, amount = ?, raw_category = ?, mapped_category = ?,
-           account_id = ?, source = ?, notes = ?, updated_at = ?
+           account_id = ?, source = ?, notes = ?, income_candidate = ?, updated_at = ?
        WHERE id = ?`
     )
     .run(
@@ -1226,6 +1263,7 @@ export function updateTransaction(id: number, data: Partial<Transaction>): Trans
       data.account_id === undefined ? existing.account_id : data.account_id,
       data.source ?? existing.source,
       data.notes ?? existing.notes,
+      data.income_candidate === undefined ? (existing.income_candidate ? 1 : 0) : (data.income_candidate ? 1 : 0),
       now(),
       id
     )
@@ -1436,6 +1474,12 @@ function getBudgetItemById(id: number): BudgetItem {
 
 export function getAllAccounts(): Account[] {
   return getDb().prepare('SELECT * FROM accounts ORDER BY id ASC').all().map(rowToAccount)
+}
+
+export function getOrCreateAccountByName(name: string, type: Account['type'] = 'checking'): Account {
+  const row = getDb().prepare('SELECT * FROM accounts WHERE LOWER(name) = LOWER(?)').get(name)
+  if (row) return rowToAccount(row)
+  return createAccount({ name, type })
 }
 
 export function createAccount(data: Partial<Account>): Account {
