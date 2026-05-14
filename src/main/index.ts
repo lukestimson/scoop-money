@@ -1,5 +1,6 @@
 import { join } from 'path'
-import { app, BrowserWindow, ipcMain, shell } from 'electron'
+import { existsSync } from 'node:fs'
+import { app, BrowserWindow, ipcMain, nativeImage, shell } from 'electron'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import dotenv from 'dotenv'
 import icon from '../../resources/icon.png?asset'
@@ -48,14 +49,16 @@ import {
   chatWithMoney,
   getAiPromptSettings,
   getAvailableModels,
+  getAiProviderState,
   getModelId,
   initAiPersistence,
   resetAiPromptSettings,
+  setAiProvider,
   setModelId,
   startMacDictation,
   updateAiPromptSettings
 } from './ai'
-import type { BudgetType, TransactionFilters } from '../types/money'
+import type { AiProvider, BudgetType, TransactionFilters } from '../types/money'
 
 dotenv.config()
 
@@ -65,6 +68,34 @@ app.setPath('userData', join(app.getPath('appData'), 'scoop-money'))
 
 const BACKUP_QUIT_TIMEOUT_MS = 8000
 let quitting = false
+
+function devDockIconPaths(): string[] {
+  const viteAsset = typeof icon === 'string' ? icon : ''
+  const relative = join(__dirname, '../../resources/icon.png')
+  return [...new Set([viteAsset, relative].filter((path) => path.length > 0))]
+}
+
+function resizeDockRaster(img: Electron.NativeImage): Electron.NativeImage {
+  const { width, height } = img.getSize()
+  const maxPx = 512
+  const longest = Math.max(width, height)
+  if (longest <= maxPx || longest === 0) return img
+  const scale = maxPx / longest
+  return img.resize({
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+    quality: 'best'
+  })
+}
+
+function loadDevDockIconNativeImage(): Electron.NativeImage | null {
+  for (const path of devDockIconPaths()) {
+    if (!existsSync(path)) continue
+    const img = nativeImage.createFromPath(path)
+    if (!img.isEmpty()) return resizeDockRaster(img)
+  }
+  return null
+}
 
 function createWindow(): void {
   const mainWindow = new BrowserWindow({
@@ -173,6 +204,8 @@ function registerIpcHandlers(): void {
   ipcMain.handle('ai:getModel', () => getModelId())
   ipcMain.handle('ai:getAvailableModels', () => getAvailableModels())
   ipcMain.handle('ai:setModel', (_event, id: string) => setModelId(id))
+  ipcMain.handle('ai:getProvider', () => getAiProviderState())
+  ipcMain.handle('ai:setProvider', (_event, provider: AiProvider) => setAiProvider(provider))
   ipcMain.handle('ai:startMacDictation', () => startMacDictation())
   ipcMain.handle('aiPrompts:get', () => getAiPromptSettings())
   ipcMain.handle('aiPrompts:update', (_event, data) => updateAiPromptSettings(data))
@@ -186,6 +219,11 @@ function registerIpcHandlers(): void {
 }
 
 app.whenReady().then(() => {
+  if (process.platform === 'darwin' && !app.isPackaged) {
+    const dockImg = loadDevDockIconNativeImage()
+    if (dockImg) app.dock?.setIcon(dockImg)
+  }
+
   electronApp.setAppUserModelId('com.scoopmoneyapp')
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)

@@ -20,12 +20,13 @@
     "build:mac": "electron-vite build && electron-builder --mac"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.90.0",
+    "@anthropic-ai/sdk": "^0.95.2",
     "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/utils": "^4.0.0",
     "better-sqlite3": "^12.9.0",
     "date-fns": "^4.1.0",
     "dotenv": "^17.4.2",
+    "openai": "^6.37.0",
     "papaparse": "^5.5.3",
     "recharts": "^3.8.1",
     "xlsx": "^0.18.5"

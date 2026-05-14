@@ -1,5 +1,6 @@
 import type {
   Account,
+  AiProvider,
   AiPromptSettings,
   BackupFile,
   BudgetItem,
@@ -26,9 +27,10 @@ const id = (): number => {
 }
 
 const accounts: Account[] = [
-  { id: 1, name: 'Checking', type: 'checking', institution: 'Preview Bank', color: '#0ea5e9', created_at: now },
-  { id: 2, name: 'Capital One', type: 'credit', institution: 'Capital One', color: '#ef4444', created_at: now },
-  { id: 3, name: 'Venmo', type: 'venmo', institution: 'Venmo', color: '#3b82f6', created_at: now }
+  { id: 1, name: 'Capital One', type: 'capital_one', institution: 'Capital One', color: '#ef4444', created_at: now },
+  { id: 2, name: 'Venmo', type: 'venmo', institution: 'Venmo', color: '#3b82f6', created_at: now },
+  { id: 3, name: 'EBT', type: 'ebt', institution: 'EBT', color: '#10b981', created_at: now },
+  { id: 4, name: 'Chase', type: 'chase', institution: 'Chase', color: '#0ea5e9', created_at: now }
 ]
 
 const MOCK_CATEGORY_STANDARD: Partial<Record<string, number>> = {
@@ -83,9 +85,9 @@ let transactions: Transaction[] = [
 ]
 
 let incomeEntries: IncomeEntry[] = [
-  income(now - 3 * day, 'Snappr portrait shoot', 'Snappr', 18500),
-  income(now - 10 * day, 'Corporate headshots', 'Stimsonphoto', 75000),
-  income(now - 18 * day, 'Product retouching', 'Upwork', 32000)
+  income(now - 3 * day, 'Snappr portrait shoot', 'Jordan Lee', 18500, 'Snappr'),
+  income(now - 10 * day, 'Corporate headshots', 'Acme Studio', 75000, 'Stimsonphoto'),
+  income(now - 18 * day, 'Product retouching', 'Morgan Blake', 32000, 'Upwork')
 ]
 
 let expectedIncomeEntries: ExpectedIncomeEntry[] = [
@@ -139,6 +141,32 @@ let aiPromptSettings: AiPromptSettings = {
   general_system_prompt: 'Preview general finance prompt. {accuracy_instruction}\n\n<money_data>{money_data}</money_data>',
   income_actual_system_prompt: 'Preview income prompt. {accuracy_instruction}\n\n<money_data>{money_data}</money_data>',
   accuracy_instruction: 'Use integer cents for all math and be concise.'
+}
+
+let aiProvider: AiProvider = 'anthropic'
+let aiModels = {
+  anthropic: 'claude-sonnet-4-20250514',
+  openai: 'gpt-5.2'
+}
+const previewModels = {
+  anthropic: [
+    { id: 'claude-sonnet-4-20250514', display_name: 'Claude Sonnet 4', provider: 'anthropic' as const },
+    { id: 'claude-opus-4-1-20250805', display_name: 'Claude Opus 4.1', provider: 'anthropic' as const },
+    { id: 'claude-opus-4-20250514', display_name: 'Claude Opus 4', provider: 'anthropic' as const },
+    { id: 'claude-3-7-sonnet-20250219', display_name: 'Claude Sonnet 3.7', provider: 'anthropic' as const },
+    { id: 'claude-3-5-sonnet-20241022', display_name: 'Claude Sonnet 3.5', provider: 'anthropic' as const },
+    { id: 'claude-3-5-haiku-20241022', display_name: 'Claude Haiku 3.5', provider: 'anthropic' as const },
+    { id: 'claude-3-haiku-20240307', display_name: 'Claude Haiku 3', provider: 'anthropic' as const }
+  ],
+  openai: [
+    { id: 'gpt-5.2', display_name: 'GPT-5.2', provider: 'openai' as const },
+    { id: 'gpt-5.2-pro', display_name: 'GPT-5.2 pro', provider: 'openai' as const },
+    { id: 'gpt-5.1', display_name: 'GPT-5.1', provider: 'openai' as const },
+    { id: 'gpt-5', display_name: 'GPT-5', provider: 'openai' as const },
+    { id: 'gpt-5-mini', display_name: 'GPT-5 mini', provider: 'openai' as const },
+    { id: 'gpt-5-nano', display_name: 'GPT-5 nano', provider: 'openai' as const },
+    { id: 'gpt-4.1', display_name: 'GPT-4.1', provider: 'openai' as const }
+  ]
 }
 
 let backupRetention = 7
@@ -198,8 +226,8 @@ function tx(date: number, description: string, amount: number, category: string,
   return { id: id(), date, description, amount, raw_category: category, mapped_category: category, account_id: accountId, source: 'csv_import', notes: '', income_candidate: false, created_at: now, updated_at: now }
 }
 
-function income(date: number, shoot: string, company: string, amount: number): IncomeEntry {
-  return { id: id(), date, shoot_name: shoot, company, amount, notes: 'Preview income entry', created_at: now, updated_at: now }
+function income(date: number, shoot: string, company: string, amount: number, incomeType: string): IncomeEntry {
+  return { id: id(), date, shoot_name: shoot, company, income_type: incomeType, amount, notes: 'Preview income entry', created_at: now, updated_at: now }
 }
 
 function copy<T>(value: T): T {
@@ -364,7 +392,7 @@ export function installBrowserMockApi(): void {
 
     getAccounts: async () => copy(accounts),
     createAccount: async (data) => {
-      const row: Account = { id: id(), name: data.name ?? 'New Account', type: data.type ?? 'checking', institution: data.institution ?? '', color: data.color ?? '#71717a', created_at: now }
+      const row: Account = { id: id(), name: data.name ?? 'Capital One', type: data.type ?? 'capital_one', institution: data.institution ?? '', color: data.color ?? '#71717a', created_at: now }
       accounts.push(row)
       return copy(row)
     },
@@ -376,7 +404,14 @@ export function installBrowserMockApi(): void {
 
     getIncomeEntries: async () => copy(incomeEntries),
     createIncomeEntry: async (data) => {
-      const row = income(data.date ?? now, data.shoot_name ?? 'Preview shoot', data.company ?? 'Preview client', data.amount ?? 0)
+      const row = income(
+        data.date ?? now,
+        data.shoot_name ?? 'Preview shoot',
+        data.company ?? 'Preview client',
+        data.amount ?? 0,
+        data.income_type ?? 'Stimsonphoto'
+      )
+      row.notes = data.notes ?? row.notes
       incomeEntries = [row, ...incomeEntries]
       return copy(row)
     },
@@ -412,10 +447,29 @@ export function installBrowserMockApi(): void {
     },
     recategorizeAllTransactions: async () => ({ updated: transactions.length }),
 
-    chat: async (_pageId, message) => ({ text: `Preview response: "${message || 'Ask a finance question'}". Real AI runs in Electron.`, dataChanged: false }),
-    getModel: async () => 'preview-model',
-    getAvailableModels: async () => [{ id: 'preview-model', display_name: 'Preview Model' }],
-    setModel: async () => ({ success: true }),
+    chat: async (_pageId, message) => ({ text: `Preview ${aiProvider} response: "${message || 'Ask a finance question'}". Real AI runs in Electron.`, dataChanged: false }),
+    getModel: async () => aiModels[aiProvider],
+    getAvailableModels: async () => copy(previewModels[aiProvider]),
+    setModel: async (modelId) => {
+      if (!previewModels[aiProvider].some((model) => model.id === modelId)) return { success: false, reason: 'invalid_model_id' }
+      aiModels = { ...aiModels, [aiProvider]: modelId }
+      return { success: true }
+    },
+    getAiProvider: async () => ({
+      provider: aiProvider,
+      model: aiModels[aiProvider],
+      models: copy(previewModels[aiProvider]),
+      configured: false
+    }),
+    setAiProvider: async (provider) => {
+      aiProvider = provider
+      return {
+        provider: aiProvider,
+        model: aiModels[aiProvider],
+        models: copy(previewModels[aiProvider]),
+        configured: false
+      }
+    },
     startMacDictation: async () => undefined,
     getAiPromptSettings: async () => copy(aiPromptSettings),
     updateAiPromptSettings: async (data) => {

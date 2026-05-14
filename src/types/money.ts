@@ -1,4 +1,4 @@
-export type AccountType = 'checking' | 'savings' | 'credit' | 'venmo'
+export type AccountType = 'capital_one' | 'venmo' | 'ebt' | 'chase'
 export type TransactionSource = 'csv_import' | 'manual' | 'ai'
 export type BudgetType = 'standard' | 'with_aid' | 'with_parents'
 export type PageId =
@@ -17,6 +17,7 @@ export type PageId =
 export type BudgetSupportScope = 'none' | 'parental' | 'government'
 export type IncomeKind = 'w2' | 'self_employment' | 'other'
 export type FilingStatus = 'single'
+export type AiProvider = 'anthropic' | 'openai'
 
 export interface Account {
   id: number
@@ -73,7 +74,9 @@ export interface BudgetLineItem {
 export interface IncomeEntry {
   id: number
   shoot_name: string
+  /** Main POC / client name from the shoot title or description. */
   company: string
+  income_type: string
   date: number
   amount: number
   notes: string
@@ -184,11 +187,19 @@ export interface ChatResult {
 export interface ModelInfo {
   id: string
   display_name?: string
+  provider?: AiProvider
 }
 
 export interface SetModelIdResult {
   success: boolean
   reason?: 'models_not_loaded' | 'invalid_model_id'
+}
+
+export interface AiProviderState {
+  provider: AiProvider
+  model: string
+  models: ModelInfo[]
+  configured: boolean
 }
 
 export interface AiPromptSettings {
@@ -262,6 +273,8 @@ export interface MoneyAPI {
   getModel(): Promise<string>
   getAvailableModels(): Promise<ModelInfo[]>
   setModel(id: string): Promise<SetModelIdResult>
+  getAiProvider(): Promise<AiProviderState>
+  setAiProvider(provider: AiProvider): Promise<AiProviderState>
   startMacDictation(): Promise<void>
   getAiPromptSettings(): Promise<AiPromptSettings>
   updateAiPromptSettings(data: Partial<AiPromptSettings>): Promise<AiPromptSettings>

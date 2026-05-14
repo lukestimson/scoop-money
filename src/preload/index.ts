@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
-import type { BudgetType, ChatMessage, MoneyAPI, TransactionFilters } from '../types/money'
+import type { AiProvider, BudgetType, ChatMessage, MoneyAPI, TransactionFilters } from '../types/money'
 
 const api: MoneyAPI = {
   onTextScaleCommand: (callback): (() => void) => {
@@ -60,6 +60,8 @@ const api: MoneyAPI = {
   getModel: () => ipcRenderer.invoke('ai:getModel'),
   getAvailableModels: () => ipcRenderer.invoke('ai:getAvailableModels'),
   setModel: (id) => ipcRenderer.invoke('ai:setModel', id),
+  getAiProvider: () => ipcRenderer.invoke('ai:getProvider'),
+  setAiProvider: (provider: AiProvider) => ipcRenderer.invoke('ai:setProvider', provider),
   startMacDictation: () => ipcRenderer.invoke('ai:startMacDictation'),
   getAiPromptSettings: () => ipcRenderer.invoke('aiPrompts:get'),
   updateAiPromptSettings: (data) => ipcRenderer.invoke('aiPrompts:update', data),

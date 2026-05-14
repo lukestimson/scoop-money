@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { addMonths, addWeeks, addYears, endOfMonth, endOfWeek, endOfYear, format, getDay, getDaysInMonth, startOfMonth, startOfWeek, startOfYear } from 'date-fns'
-import type { Account, ImportedFileRecord, Transaction } from '../../../types/money'
+import type { Account, BudgetItem, BudgetLineItem, ImportedFileRecord, Transaction } from '../../../types/money'
+import { parseLocalDateToUnix } from '../../../types/dateParsing'
 import { useAppContext } from '../context/AppContext'
-import { useChat } from '../context/ChatContext'
 import { useDateFormat } from '../context/DateFormatContext'
 import { formatCurrency, parseCurrencyInput } from '../lib/currency'
+import { getStoredBudgetType } from '../lib/budget'
+import { BUDGET_CATEGORY_ORDER } from '../../../types/budgetCategories'
 import { ChatBox } from './ChatBox'
+import { ListSectionSearchBar, type ListSearchPhase } from './ListSectionSearchBar'
 
 type DisplayPeriod = 'week' | 'month' | 'year'
 type SortKey = 'date' | 'amount' | 'category' | 'recent'
@@ -23,6 +26,85 @@ const IMPORT_COLLAPSED_KEY = 'scoop_import_collapsed'
 const PERIOD_KEY = 'scoop_txn_period'
 const SORT_KEY = 'scoop_txn_sort'
 const ANCHOR_KEY = 'scoop_txn_anchor'
+
+/** Same keys as Budget.tsx — read when building category pickers so Transactions stays in sync. */
+const BUDGET_CUSTOM_CATEGORIES_KEY = 'scoop_budget_custom_categories'
+const BUDGET_HIDDEN_CATEGORIES_KEY = 'scoop_budget_hidden_categories'
+
+function loadBudgetCustomCategoriesForTxn(): string[] {
+  try {
+    const raw = localStorage.getItem(BUDGET_CUSTOM_CATEGORIES_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw) as unknown
+      if (Array.isArray(parsed)) return parsed.map(String).filter(Boolean)
+    }
+  } catch {
+    /* ignore */
+  }
+  return []
+}
+
+function loadBudgetHiddenCategorySetForTxn(): Set<string> {
+  try {
+    const raw = localStorage.getItem(BUDGET_HIDDEN_CATEGORIES_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw) as unknown
+      if (Array.isArray(parsed)) return new Set(parsed.map(String))
+    }
+  } catch {
+    /* ignore */
+  }
+  return new Set()
+}
+
+function isParentalGovBudgetLine(line: BudgetLineItem): boolean {
+  return line.section === 'Parental & Gov Help'
+}
+
+function buildTransactionCategoryOptions(
+  transactions: Transaction[],
+  budgetLines: BudgetLineItem[],
+  budgetItems: BudgetItem[]
+): string[] {
+  const hidden = loadBudgetHiddenCategorySetForTxn()
+  const combined: string[] = []
+  const seen = new Set<string>()
+  for (const cat of BUDGET_CATEGORY_ORDER) {
+    if (hidden.has(cat)) continue
+    combined.push(cat)
+    seen.add(cat)
+  }
+  for (const cat of loadBudgetCustomCategoriesForTxn()) {
+    const t = cat.trim()
+    if (!t || seen.has(t)) continue
+    combined.push(t)
+    seen.add(t)
+  }
+  for (const line of budgetLines) {
+    const c = line.category.trim()
+    if (!c || seen.has(c) || isParentalGovBudgetLine(line)) continue
+    combined.push(c)
+    seen.add(c)
+  }
+  for (const item of budgetItems) {
+    const c = item.category.trim()
+    if (!c || seen.has(c)) continue
+    combined.push(c)
+    seen.add(c)
+  }
+  for (const tx of transactions) {
+    const c = tx.mapped_category?.trim()
+    if (!c || seen.has(c)) continue
+    combined.push(c)
+    seen.add(c)
+  }
+  const unc = 'Uncategorized'
+  if (!seen.has(unc)) {
+    combined.push(unc)
+    seen.add(unc)
+  }
+  return combined.sort((a, b) => a.localeCompare(b))
+}
 
 const SORT_OPTIONS: ReadonlyArray<{ id: SortKey; label: string }> = [
   { id: 'date', label: 'Date' },
@@ -79,12 +161,12 @@ function getStoredAnchor(): Date {
 
 export function Transactions() {
   const { dataVersion, bumpDataVersion } = useAppContext()
-  const { getChat } = useChat()
   const { formatDate } = useDateFormat()
-  const [chatExpanded, setChatExpanded] = useState(false)
   const [transactions, setTransactions] = useState<Transaction[]>([])
   const [accounts, setAccounts] = useState<Account[]>([])
   const [importedFiles, setImportedFiles] = useState<ImportedFileRecord[]>([])
+  const [budgetLineItems, setBudgetLineItems] = useState<BudgetLineItem[]>([])
+  const [budgetSheetItems, setBudgetSheetItems] = useState<BudgetItem[]>([])
   const [selectedAccountIds, setSelectedAccountIds] = useState<number[]>([])
   const [selectedCategories, setSelectedCategories] = useState<string[]>([])
   const [anchor, setAnchor] = useState(() => getStoredAnchor())
@@ -96,11 +178,13 @@ export function Transactions() {
   const [editMode, setEditMode] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ txId: number; x: number; y: number; confirming?: boolean } | null>(null)
   const [fileContextMenu, setFileContextMenu] = useState<{ fileId: number; x: number; y: number } | null>(null)
-  const [inlineEditTxId, setInlineEditTxId] = useState<number | null>(null)
   const [deleteAllArmed, setDeleteAllArmed] = useState(false)
   const [error, setError] = useState('')
   const [importCollapsed, setImportCollapsed] = useState(() => localStorage.getItem(IMPORT_COLLAPSED_KEY) === 'true')
   const [hasUndoActions, setHasUndoActions] = useState(false)
+  const [txnSearchFieldOpen, setTxnSearchFieldOpen] = useState(false)
+  const [txnSearchQuery, setTxnSearchQuery] = useState('')
+  const [txnSearchPhase, setTxnSearchPhase] = useState<ListSearchPhase>(1)
   const undoStackRef = useRef<UndoAction[]>([])
   const inputRef = useRef<HTMLInputElement | null>(null)
   const sortRef = useRef<HTMLDivElement>(null)
@@ -158,17 +242,21 @@ export function Transactions() {
     Promise.all([
       window.api.getAccounts(),
       window.api.getTransactions(),
-      window.api.getImportedFiles({ start: monthBoundsForImport.start, end: monthBoundsForImport.end })
-    ]).then(([nextAccounts, nextTransactions, nextImportedFiles]) => {
+      window.api.getImportedFiles({ start: monthBoundsForImport.start, end: monthBoundsForImport.end }),
+      window.api.getBudgetLineItems(),
+      window.api.getBudgetItems(getStoredBudgetType())
+    ]).then(([nextAccounts, nextTransactions, nextImportedFiles, lines, items]) => {
       setAccounts(nextAccounts)
       setTransactions(nextTransactions)
       setImportedFiles(nextImportedFiles)
+      setBudgetLineItems(lines)
+      setBudgetSheetItems(items)
     })
   }, [dataVersion, monthBoundsForImport.end, monthBoundsForImport.start])
 
   const categories = useMemo(
-    () => Array.from(new Set(transactions.map((tx) => tx.mapped_category).filter(Boolean))).sort(),
-    [transactions]
+    () => buildTransactionCategoryOptions(transactions, budgetLineItems, budgetSheetItems),
+    [transactions, budgetLineItems, budgetSheetItems]
   )
 
   const visibleTransactions = useMemo(
@@ -208,8 +296,56 @@ export function Transactions() {
     return list.sort((a, b) => b.date - a.date)
   }, [categorySpendRank, sortKey, visibleTransactions])
 
+  const txnPhase1Filtered = useMemo(() => {
+    const q = txnSearchQuery.trim().toLowerCase()
+    if (!q) return sortedTransactions
+    return sortedTransactions.filter((tx) => (tx.description || '').toLowerCase().includes(q))
+  }, [sortedTransactions, txnSearchQuery])
+
+  const txnSearchFiltered = useMemo(() => {
+    const q = txnSearchQuery.trim().toLowerCase()
+    if (!q) return sortedTransactions
+    if (txnSearchPhase === 1) {
+      return sortedTransactions.filter((tx) => (tx.description || '').toLowerCase().includes(q))
+    }
+    return sortedTransactions.filter((tx) => {
+      const acct = accounts.find((a) => a.id === tx.account_id)?.name ?? ''
+      const blob = [
+        tx.description,
+        tx.mapped_category,
+        tx.raw_category,
+        formatCurrency(tx.amount),
+        String(tx.amount),
+        formatDate(tx.date),
+        acct,
+        tx.source ?? '',
+        tx.notes ?? '',
+        tx.income_candidate ? 'income' : ''
+      ]
+        .join(' ')
+        .toLowerCase()
+      return blob.includes(q)
+    })
+  }, [accounts, formatDate, sortedTransactions, txnSearchPhase, txnSearchQuery])
+
+  const txnSearchShowEnterHint =
+    txnSearchFieldOpen && txnSearchPhase === 1 && Boolean(txnSearchQuery.trim()) && txnPhase1Filtered.length === 0
+
+  const handleTxnSearchKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLInputElement>) => {
+      if (e.key !== 'Enter') return
+      e.preventDefault()
+      if (txnSearchPhase !== 1) return
+      const q = txnSearchQuery.trim()
+      if (!q) return
+      const any = sortedTransactions.some((tx) => (tx.description || '').toLowerCase().includes(q.toLowerCase()))
+      if (!any) setTxnSearchPhase(2)
+    },
+    [sortedTransactions, txnSearchPhase, txnSearchQuery]
+  )
+
   const totalSpent = useMemo(
-    () => visibleTransactions.reduce((sum, tx) => sum + tx.amount, 0),
+    () => visibleTransactions.reduce((sum, tx) => sum - tx.amount, 0),
     [visibleTransactions]
   )
 
@@ -320,8 +456,8 @@ export function Transactions() {
   }
 
   const incomeFlaggedTx = useMemo(
-    () => sortedTransactions.filter((tx) => tx.income_candidate),
-    [sortedTransactions]
+    () => txnSearchFiltered.filter((tx) => tx.income_candidate),
+    [txnSearchFiltered]
   )
 
   async function ignoreIncomeFlags(): Promise<void> {
@@ -347,12 +483,9 @@ export function Transactions() {
     if (created) bumpDataVersion()
   }, [bumpDataVersion])
 
-  const txChat = getChat('expenses-actual')
-  const chatFadeHeight = chatExpanded ? Math.min(txChat.height + 128, 680) : 96
-
   return (
-    <div className="relative h-full overflow-hidden bg-white dark:bg-zinc-950">
-      <div className="h-full overflow-y-auto px-4 py-6 pb-28 md:px-8">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-white dark:bg-zinc-950">
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-6 md:px-8">
         <input ref={inputRef} type="file" accept=".csv,.xls,.xlsx" className="hidden" onChange={(event) => { const input = event.currentTarget; const file = input.files?.[0]; if (file) { void importFile(file).finally(() => { input.value = '' }) } else { input.value = '' } }} />
 
         {/* Header — full width */}
@@ -416,7 +549,7 @@ export function Transactions() {
                 </button>
                 <div className="min-w-0 flex-1">
                   {importedFiles.length === 0 ? (
-                    <span className="text-[12px] text-zinc-500 dark:text-zinc-400">No files for this month</span>
+                    <span className="block text-right text-[12px] text-zinc-500 dark:text-zinc-400">No files for this month</span>
                   ) : (
                     <div className="flex flex-col gap-1">
                       {importedFiles.map((file) => <ImportedFileEntry key={file.id} file={file} formatDate={formatDate} onContextMenu={(e) => { e.preventDefault(); setFileContextMenu({ fileId: file.id, x: e.clientX, y: e.clientY }) }} />)}
@@ -447,10 +580,10 @@ export function Transactions() {
         )}
 
         {/* Grid: filter rail + transactions list */}
-        <div className="md:grid md:grid-cols-[auto_minmax(0,1fr)] md:items-start md:gap-x-4">
-          {/* Left filter rail */}
-          <div className="mb-4 md:col-start-1 md:row-start-1 md:mb-0">
-            <div className="sticky top-6 w-full pt-7 md:w-[7.5rem]">
+        <div className="md:grid md:grid-cols-[auto_minmax(0,1fr)] md:items-stretch md:gap-x-4">
+          {/* Left filter rail — stretch to match transactions card height */}
+          <div className="mb-4 flex min-h-0 w-full flex-col md:col-start-1 md:row-start-1 md:mb-0 md:h-full">
+            <div className="sticky top-6 flex min-h-0 w-full flex-1 flex-col md:w-[7.5rem]">
               <TransactionsFilterRail
                 accounts={accounts} categories={categories} selectedAccountIds={selectedAccountIds} selectedCategories={selectedCategories}
                 onToggleAccount={toggleAccount} onToggleCategory={toggleCategory} onClearAccounts={() => setSelectedAccountIds([])} onClearCategories={() => setSelectedCategories([])}
@@ -459,33 +592,53 @@ export function Transactions() {
           </div>
 
           {/* Transactions list */}
-          <div className="min-w-0 md:col-start-2 md:row-start-1">
-            {/* + add / undo / edit / delete-all buttons */}
-            <div className="mb-1 flex items-center justify-between">
-              <button type="button" onClick={() => setAdding(true)} className="flex h-6 w-6 items-center justify-center text-zinc-400 transition-colors hover:text-zinc-700 dark:hover:text-zinc-200" aria-label="Add transaction"><PlusIcon /></button>
-              <div className="flex items-center gap-1">
-                {hasUndoActions && (
-                  <button type="button" onClick={() => void undoLastAction()} className="flex h-6 w-6 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200" aria-label="Undo (⌘Z)"><UndoIcon /></button>
-                )}
-                {editMode ? (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => void deleteAllTransactions()}
-                      className={`rounded-full px-2 py-1 text-[11px] font-medium transition-colors ${deleteAllArmed ? 'bg-red-50 text-red-700 ring-1 ring-inset ring-red-200 dark:bg-red-950/30 dark:text-red-300 dark:ring-red-900' : 'text-zinc-400 hover:text-red-600 dark:hover:text-red-300'}`}
-                    >
-                      {deleteAllArmed ? 'Confirm Delete All' : 'Delete All'}
-                    </button>
-                    <button type="button" onClick={() => { setEditMode(false); setDeleteAllArmed(false) }} className="flex h-6 w-6 items-center justify-center rounded-full text-emerald-600 transition-colors hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-950/30" aria-label="Done editing"><CheckIcon /></button>
-                  </>
-                ) : (
-                  <button type="button" onClick={() => setEditMode(true)} className="flex h-6 w-6 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200" aria-label="Edit transactions"><PencilIcon /></button>
-                )}
-              </div>
-            </div>
-
+          <div className="min-w-0 md:col-start-2 md:row-start-1 md:flex md:min-h-0 md:flex-1 md:flex-col">
             {error ? <div className="mb-2 text-[12px] text-red-600 dark:text-red-400">{error}</div> : null}
-            <section className="overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
+            <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
+              <div className="border-b border-zinc-100 bg-zinc-50/50 px-2 py-1.5 dark:border-zinc-800 dark:bg-zinc-950/40">
+                <ListSectionSearchBar
+                  placeholder="Search transactions..."
+                  value={txnSearchQuery}
+                  onChange={(v) => {
+                    setTxnSearchQuery(v)
+                    setTxnSearchPhase(1)
+                  }}
+                  fieldOpen={txnSearchFieldOpen}
+                  onFieldOpen={() => setTxnSearchFieldOpen(true)}
+                  onFieldClose={() => {
+                    setTxnSearchFieldOpen(false)
+                    setTxnSearchQuery('')
+                    setTxnSearchPhase(1)
+                  }}
+                  phase={txnSearchPhase}
+                  onPhaseReset={() => setTxnSearchPhase(1)}
+                  showPressEnterHint={txnSearchShowEnterHint}
+                  enterHintText="Press Enter to search all transaction data"
+                  onInputKeyDown={handleTxnSearchKeyDown}
+                />
+              </div>
+              <div className="flex items-center justify-between border-b border-zinc-100 px-2 py-1.5 dark:border-zinc-800">
+                <button type="button" onClick={() => setAdding(true)} className="flex h-6 w-6 items-center justify-center text-zinc-400 transition-colors hover:text-zinc-700 dark:hover:text-zinc-200" aria-label="Add transaction"><PlusIcon /></button>
+                <div className="flex items-center gap-1">
+                  {hasUndoActions && (
+                    <button type="button" onClick={() => void undoLastAction()} className="flex h-6 w-6 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200" aria-label="Undo (⌘Z)"><UndoIcon /></button>
+                  )}
+                  {editMode ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => void deleteAllTransactions()}
+                        className={`rounded-full px-2 py-1 text-[11px] font-medium transition-colors ${deleteAllArmed ? 'bg-red-50 text-red-700 ring-1 ring-inset ring-red-200 dark:bg-red-950/30 dark:text-red-300 dark:ring-red-900' : 'text-zinc-400 hover:text-red-600 dark:hover:text-red-300'}`}
+                      >
+                        {deleteAllArmed ? 'Confirm Delete All' : 'Delete All'}
+                      </button>
+                      <button type="button" onClick={() => { setEditMode(false); setDeleteAllArmed(false) }} className="flex h-6 w-6 items-center justify-center rounded-full text-emerald-600 transition-colors hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-950/30" aria-label="Done editing"><CheckIcon /></button>
+                    </>
+                  ) : (
+                    <button type="button" onClick={() => setEditMode(true)} className="flex h-6 w-6 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200" aria-label="Edit transactions"><PencilIcon /></button>
+                  )}
+                </div>
+              </div>
               <div className="grid grid-cols-[90px_1fr_130px_80px_100px_48px] items-center gap-2 border-b border-zinc-100 bg-zinc-50/80 px-4 py-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950/50 dark:text-zinc-400">
                 <div>Date</div>
                 <div>Description</div>
@@ -496,20 +649,19 @@ export function Transactions() {
               </div>
               {adding ? <AddTransactionRow accounts={accounts} categories={categories} onDone={handleAddDone} /> : null}
               {sortedTransactions.length === 0 && !adding ? (
-                <div className="px-4 py-10 text-center text-sm text-zinc-500 dark:text-zinc-400">No transactions for this period — use the controls above or import a CSV</div>
+                <div className="px-4 py-10 text-center text-sm text-zinc-500 dark:text-zinc-400">No transactions for this period</div>
+              ) : sortedTransactions.length > 0 && txnSearchFiltered.length === 0 ? (
+                <div className="px-4 py-10 text-center text-sm text-zinc-500 dark:text-zinc-400">No transactions match your search.</div>
               ) : (
-                sortedTransactions.map((tx) => (
+                txnSearchFiltered.map((tx) => (
                   <TransactionRow
                     key={tx.id}
                     transaction={tx}
                     accounts={accounts}
                     categories={categories}
                     editMode={editMode}
-                    inlineEdit={inlineEditTxId === tx.id}
                     onChanged={bumpDataVersion}
                     onDelete={() => deleteTransaction(tx.id)}
-                    onStartEdit={() => setInlineEditTxId(tx.id)}
-                    onCancelInlineEdit={() => setInlineEditTxId(null)}
                     onContextMenu={(e) => { e.preventDefault(); setContextMenu({ txId: tx.id, x: e.clientX, y: e.clientY }) }}
                   />
                 ))
@@ -539,29 +691,17 @@ export function Transactions() {
                     <button type="button" onClick={() => setContextMenu(null)} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-zinc-500 hover:bg-zinc-50 dark:text-zinc-400 dark:hover:bg-zinc-800">Cancel</button>
                   </>
                 ) : (
-                  <>
-                    <button type="button" onClick={() => { setInlineEditTxId(contextMenu.txId); setContextMenu(null) }} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-zinc-700 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-800">
-                      <PencilIcon />Edit
-                    </button>
-                    <button type="button" onClick={() => setContextMenu({ ...contextMenu, confirming: true })} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30">
-                      <XIcon />Delete
-                    </button>
-                  </>
+                  <button type="button" onClick={() => setContextMenu({ ...contextMenu, confirming: true })} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30">
+                    <XIcon />Delete
+                  </button>
                 )}
               </div>
             )}
           </div>
         </div>
       </div>
-      <div className="pointer-events-none absolute inset-x-8 bottom-4 z-20">
-        <div
-          aria-hidden="true"
-          style={{ height: chatFadeHeight }}
-          className="absolute inset-x-0 bottom-0 -z-10 bg-gradient-to-t from-white via-white/95 to-transparent transition-[height] duration-200 dark:from-zinc-950 dark:via-zinc-950/95"
-        />
-        <div className="pointer-events-auto">
-          <ChatBox pageId="expenses-actual" fullWidth onExpandedChange={setChatExpanded} />
-        </div>
+      <div className="shrink-0 border-t border-zinc-200 bg-white px-4 pb-2 pt-1 md:px-8 dark:border-zinc-800 dark:bg-zinc-950">
+        <ChatBox pageId="expenses-actual" fullWidth />
       </div>
     </div>
   )
@@ -711,9 +851,9 @@ function TransactionsFilterRail({
   }, [accounts])
 
   return (
-    <div className="w-full overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
-      <div className="border-b border-zinc-100 bg-zinc-50/80 px-2.5 py-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950/50 dark:text-zinc-400">Filters</div>
-      <div className="px-2 py-1.5">
+    <div className="flex h-full min-h-0 w-full flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
+      <div className="shrink-0 border-b border-zinc-100 bg-zinc-50/80 px-2.5 py-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950/50 dark:text-zinc-400">Filters</div>
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 py-1.5">
         <FilterGroup ariaLabel="Accounts" hasSelection={selectedAccountIds.length > 0} onClear={onClearAccounts}>
           {accountsForDisplay.map((a) => (
             <FilterPill key={a.id} label={a.name} active={selectedAccountIds.includes(a.id)} tone="sky" onClick={() => { if (a.id > 0) onToggleAccount(a.id) }} />
@@ -829,84 +969,176 @@ function formatImportSpan(file: ImportedFileRecord, formatDate: (unix: number) =
 // Transaction rows
 // ---------------------------------------------------------------------------
 
-function TransactionRow({ transaction, accounts, categories, editMode, inlineEdit, onChanged, onDelete, onStartEdit, onCancelInlineEdit, onContextMenu }: {
-  transaction: Transaction; accounts: Account[]; categories: string[]; editMode: boolean; inlineEdit: boolean;
-  onChanged: () => void; onDelete: () => Promise<void>; onStartEdit: () => void; onCancelInlineEdit: () => void; onContextMenu: (e: React.MouseEvent) => void
+type TxEditField = 'date' | 'description' | 'category' | 'account' | 'amount' | null
+
+function TransactionRow({ transaction, accounts, categories, editMode, onChanged, onDelete, onContextMenu }: {
+  transaction: Transaction; accounts: Account[]; categories: string[]; editMode: boolean;
+  onChanged: () => void; onDelete: () => Promise<void>; onContextMenu: (e: React.MouseEvent) => void
 }) {
-  const [description, setDescription] = useState(transaction.description)
-  const [category, setCategory] = useState(transaction.mapped_category)
-  const [amount, setAmount] = useState(formatCurrency(transaction.amount))
-  const [accountId, setAccountId] = useState(transaction.account_id)
+  const [activeField, setActiveField] = useState<TxEditField>(null)
+  const [dateDraft, setDateDraft] = useState(formatTransactionDateInput(transaction.date))
+  const [descDraft, setDescDraft] = useState(transaction.description)
+  const [catDraft, setCatDraft] = useState(() => transaction.mapped_category?.trim() || 'Uncategorized')
+  const [amountDraft, setAmountDraft] = useState(formatCurrency(transaction.amount))
+  const [accountDraft, setAccountDraft] = useState(transaction.account_id)
+  const rowRef = useRef<HTMLDivElement>(null)
+  const savingRef = useRef(false)
+  const commitRef = useRef<() => void>(() => {})
   const { formatDate } = useDateFormat()
 
   const accountName = useMemo(() => {
     if (!transaction.account_id) return ''
-    const acct = accounts.find((a) => a.id === transaction.account_id)
-    return acct?.name ?? ''
+    return accounts.find((a) => a.id === transaction.account_id)?.name ?? ''
   }, [accounts, transaction.account_id])
 
   useEffect(() => {
-    setDescription(transaction.description)
-    setCategory(transaction.mapped_category)
-    setAmount(formatCurrency(transaction.amount))
-    setAccountId(transaction.account_id)
-  }, [transaction])
+    if (activeField) return
+    setDateDraft(formatTransactionDateInput(transaction.date))
+    setDescDraft(transaction.description)
+    setCatDraft(transaction.mapped_category?.trim() || 'Uncategorized')
+    setAmountDraft(formatCurrency(transaction.amount))
+    setAccountDraft(transaction.account_id)
+  }, [activeField, transaction])
 
-  async function save(): Promise<void> {
-    const parsed = parseCurrencyInput(amount)
-    await window.api.updateTransaction(transaction.id, {
-      description,
-      mapped_category: category,
-      amount: parsed ?? transaction.amount,
-      account_id: accountId
-    })
-    onCancelInlineEdit()
-    onChanged()
-  }
+  const saveField = useCallback(async (): Promise<void> => {
+    if (savingRef.current) return
+    savingRef.current = true
+    try {
+      const parsed = parseCurrencyInput(amountDraft)
+      await window.api.updateTransaction(transaction.id, {
+        date: parseTransactionDateInput(dateDraft, transaction.date),
+        description: descDraft.trim(),
+        mapped_category: catDraft,
+        amount: parsed ?? transaction.amount,
+        account_id: accountDraft
+      })
+      onChanged()
+    } finally { savingRef.current = false }
+  }, [dateDraft, descDraft, catDraft, amountDraft, accountDraft, transaction, onChanged])
+
+  const pickCategoryAndFinish = useCallback(
+    async (category: string): Promise<void> => {
+      if (savingRef.current) return
+      savingRef.current = true
+      try {
+        const parsed = parseCurrencyInput(amountDraft)
+        await window.api.updateTransaction(transaction.id, {
+          date: parseTransactionDateInput(dateDraft, transaction.date),
+          description: descDraft.trim(),
+          mapped_category: category,
+          amount: parsed ?? transaction.amount,
+          account_id: accountDraft
+        })
+        setCatDraft(category)
+        onChanged()
+        setActiveField(null)
+      } finally {
+        savingRef.current = false
+      }
+    },
+    [accountDraft, amountDraft, dateDraft, descDraft, onChanged, transaction]
+  )
+
+  const pickAccountAndFinish = useCallback(
+    async (accountId: number | null): Promise<void> => {
+      if (savingRef.current) return
+      savingRef.current = true
+      try {
+        const parsed = parseCurrencyInput(amountDraft)
+        await window.api.updateTransaction(transaction.id, {
+          date: parseTransactionDateInput(dateDraft, transaction.date),
+          description: descDraft.trim(),
+          mapped_category: catDraft,
+          amount: parsed ?? transaction.amount,
+          account_id: accountId
+        })
+        setAccountDraft(accountId)
+        onChanged()
+        setActiveField(null)
+      } finally {
+        savingRef.current = false
+      }
+    },
+    [amountDraft, catDraft, dateDraft, descDraft, onChanged, transaction]
+  )
+
+  const commitAndDeactivate = useCallback((): void => { void saveField(); setActiveField(null) }, [saveField])
+  commitRef.current = commitAndDeactivate
+
+  useEffect(() => {
+    if (!activeField) return
+    const handler = (e: PointerEvent): void => {
+      if (rowRef.current?.contains(e.target as Node | null)) return
+      commitRef.current()
+    }
+    document.addEventListener('pointerdown', handler, true)
+    return () => document.removeEventListener('pointerdown', handler, true)
+  }, [activeField])
 
   function handleKeyDown(e: React.KeyboardEvent): void {
-    if (e.key === 'Enter') void save()
+    if (e.key === 'Enter') { e.preventDefault(); commitAndDeactivate() }
     if (e.key === 'Escape') {
-      setDescription(transaction.description)
-      setCategory(transaction.mapped_category)
-      setAmount(formatCurrency(transaction.amount))
-      setAccountId(transaction.account_id)
-      onCancelInlineEdit()
+      e.preventDefault()
+      setDateDraft(formatTransactionDateInput(transaction.date))
+      setDescDraft(transaction.description)
+      setCatDraft(transaction.mapped_category?.trim() || 'Uncategorized')
+      setAmountDraft(formatCurrency(transaction.amount))
+      setAccountDraft(transaction.account_id)
+      setActiveField(null)
     }
   }
 
-  if (inlineEdit) {
-    return (
-      <div className="group/row grid grid-cols-[90px_1fr_130px_80px_100px_48px] items-center gap-2 border-b border-zinc-100 px-4 py-2 text-sm last:border-b-0 dark:border-zinc-800" onContextMenu={onContextMenu}>
-        <div className="text-zinc-500 dark:text-zinc-400">{formatDate(transaction.date)}</div>
-        <input autoFocus value={description} onChange={(e) => setDescription(e.target.value)} onKeyDown={handleKeyDown} className="min-w-0 rounded bg-zinc-50 px-1.5 py-0.5 text-sm outline-none ring-1 ring-zinc-200 dark:bg-zinc-800 dark:ring-zinc-700" />
-        <InlineEditCategoryInput value={category} categories={categories} onChange={setCategory} onKeyDown={handleKeyDown} />
-        <InlineEditAccountDropdown value={accountId} accounts={accounts} onChange={setAccountId} />
-        <input value={amount} onChange={(e) => setAmount(e.target.value)} onKeyDown={handleKeyDown} className="min-w-0 rounded bg-zinc-50 px-1.5 py-0.5 text-right text-sm outline-none ring-1 ring-zinc-200 dark:bg-zinc-800 dark:ring-zinc-700" />
-        <button type="button" onClick={() => void save()} className="inline-flex h-6 w-6 items-center justify-center rounded-full text-emerald-600 transition-colors hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-950/30" aria-label="Confirm edit"><CheckIcon /></button>
-      </div>
-    )
-  }
-
   return (
-    <div className="group/row grid grid-cols-[90px_1fr_130px_80px_100px_48px] items-center gap-2 border-b border-zinc-100 px-4 py-3 text-sm last:border-b-0 dark:border-zinc-800" onContextMenu={onContextMenu}>
-      <div className="text-zinc-500 dark:text-zinc-400">{formatDate(transaction.date)}</div>
-      <div className="flex min-w-0 items-center gap-1.5">
-        <span className="truncate text-zinc-900 dark:text-zinc-100">{transaction.description || 'Untitled'}</span>
-        {transaction.income_candidate && <span className="shrink-0 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-700 ring-1 ring-inset ring-emerald-200 dark:bg-emerald-950/30 dark:text-emerald-300 dark:ring-emerald-900">Income?</span>}
-      </div>
-      <div className="truncate text-zinc-500 dark:text-zinc-400">{transaction.mapped_category || 'Uncategorized'}</div>
-      <div className="truncate text-[11px] text-zinc-400 dark:text-zinc-500">{accountName}</div>
-      <div className={`text-right font-medium ${transaction.amount < 0 ? 'text-red-600' : 'text-emerald-600'}`}>{formatCurrency(transaction.amount)}</div>
+    <div ref={rowRef} className="group/row grid grid-cols-[90px_1fr_130px_80px_100px_48px] items-center gap-2 border-b border-zinc-100 px-4 py-2.5 text-sm last:border-b-0 dark:border-zinc-800" onContextMenu={onContextMenu}>
+      {/* Date */}
+      {activeField === 'date' ? (
+        <input autoFocus value={dateDraft} onChange={(e) => setDateDraft(e.target.value)} onKeyDown={handleKeyDown} className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-sm tabular-nums text-zinc-900 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:ring-zinc-800" />
+      ) : (
+        <button type="button" onClick={() => setActiveField('date')} className="flex h-7 min-w-0 items-center text-left text-zinc-500 dark:text-zinc-400">{formatDate(transaction.date)}</button>
+      )}
+
+      {/* Description */}
+      {activeField === 'description' ? (
+        <input autoFocus value={descDraft} onChange={(e) => setDescDraft(e.target.value)} onKeyDown={handleKeyDown} className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-sm text-zinc-900 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:ring-zinc-800" />
+      ) : (
+        <button type="button" onClick={() => setActiveField('description')} className="flex h-7 min-w-0 items-center gap-1.5 truncate text-left text-zinc-900 dark:text-zinc-100">
+          <span className="truncate">{transaction.description || 'Untitled'}</span>
+          {transaction.income_candidate && <span className="shrink-0 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-700 ring-1 ring-inset ring-emerald-200 dark:bg-emerald-950/30 dark:text-emerald-300 dark:ring-emerald-900">Income?</span>}
+        </button>
+      )}
+
+      {/* Category */}
+      {activeField === 'category' ? (
+        <InlineEditCategoryInput
+          value={catDraft}
+          categories={categories}
+          onChange={setCatDraft}
+          onCommittedPick={(cat) => void pickCategoryAndFinish(cat)}
+          onKeyDown={handleKeyDown}
+        />
+      ) : (
+        <button type="button" onClick={() => setActiveField('category')} className="flex h-7 min-w-0 items-center truncate text-left text-zinc-500 dark:text-zinc-400">{transaction.mapped_category || 'Uncategorized'}</button>
+      )}
+
+      {/* Account */}
+      {activeField === 'account' ? (
+        <InlineEditAccountDropdown value={accountDraft} accounts={accounts} onChange={setAccountDraft} onCommittedPick={(id) => void pickAccountAndFinish(id)} />
+      ) : (
+        <button type="button" onClick={() => setActiveField('account')} className="flex h-7 min-w-0 items-center truncate text-left text-[11px] text-zinc-400 dark:text-zinc-500">{accountName || '—'}</button>
+      )}
+
+      {/* Amount */}
+      {activeField === 'amount' ? (
+        <input autoFocus value={amountDraft} onChange={(e) => setAmountDraft(e.target.value)} onKeyDown={handleKeyDown} className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-right text-sm tabular-nums text-zinc-900 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:ring-zinc-800" />
+      ) : (
+        <button type="button" onClick={() => setActiveField('amount')} className={`flex h-7 min-w-0 items-center justify-end font-medium tabular-nums ${transaction.amount < 0 ? 'text-red-600' : 'text-emerald-600'}`}>{formatCurrency(transaction.amount)}</button>
+      )}
+
+      {/* Edit-mode delete icon */}
       {editMode ? (
-        <div className="flex items-center gap-0.5">
-          <button type="button" onClick={() => onStartEdit()} aria-label="Edit" className="inline-flex h-6 w-6 items-center justify-center rounded-full text-zinc-300 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-200">
-            <PencilIcon />
-          </button>
-          <button type="button" onClick={() => void onDelete()} aria-label={`Delete ${transaction.description || 'transaction'}`} className="inline-flex h-6 w-6 items-center justify-center rounded-full text-zinc-300 transition-colors hover:bg-red-50 hover:text-red-600 dark:text-zinc-600 dark:hover:bg-red-950/30 dark:hover:text-red-300">
-            <XIcon />
-          </button>
-        </div>
+        <button type="button" onClick={() => void onDelete()} aria-label={`Delete ${transaction.description || 'transaction'}`} className="inline-flex h-6 w-6 items-center justify-center rounded-full text-zinc-300 transition-colors hover:bg-red-50 hover:text-red-600 dark:text-zinc-600 dark:hover:bg-red-950/30 dark:hover:text-red-300">
+          <XIcon />
+        </button>
       ) : (
         <span />
       )}
@@ -914,14 +1146,25 @@ function TransactionRow({ transaction, accounts, categories, editMode, inlineEdi
   )
 }
 
+function formatTransactionDateInput(unix: number): string {
+  return format(new Date(unix * 1000), 'M/d/yyyy')
+}
+
+function parseTransactionDateInput(value: string, fallback: number): number {
+  const localDate = parseLocalDateToUnix(value)
+  if (localDate !== null) return localDate
+  const parsed = Date.parse(value)
+  return Number.isNaN(parsed) ? fallback : Math.floor(parsed / 1000)
+}
+
 // ---------------------------------------------------------------------------
 // Inline account dropdown (replaces native select)
 // ---------------------------------------------------------------------------
 
-function InlineEditAccountDropdown({ value, accounts, onChange }: {
-  value: number | null; accounts: Account[]; onChange: (id: number | null) => void
+function InlineEditAccountDropdown({ value, accounts, onChange, onCommittedPick }: {
+  value: number | null; accounts: Account[]; onChange: (id: number | null) => void; onCommittedPick?: (id: number | null) => void
 }) {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(true)
   const ref = useRef<HTMLDivElement>(null)
   const selected = accounts.find((a) => a.id === value)
 
@@ -941,9 +1184,9 @@ function InlineEditAccountDropdown({ value, accounts, onChange }: {
       </button>
       {open && (
         <div className="absolute left-0 top-full z-40 mt-1 min-w-[120px] overflow-hidden rounded-lg border border-zinc-200 bg-white p-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
-          <button type="button" onMouseDown={(e) => { e.preventDefault(); onChange(null); setOpen(false) }} className="flex w-full rounded-md px-2.5 py-1.5 text-left text-[11px] font-medium text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-950">—</button>
+          <button type="button" onMouseDown={(e) => { e.preventDefault(); onChange(null); onCommittedPick?.(null); setOpen(false) }} className="flex w-full rounded-md px-2.5 py-1.5 text-left text-[11px] font-medium text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-950">—</button>
           {accounts.map((a) => (
-            <button key={a.id} type="button" onMouseDown={(e) => { e.preventDefault(); onChange(a.id); setOpen(false) }} className={`flex w-full rounded-md px-2.5 py-1.5 text-left text-[11px] font-medium transition-colors ${a.id === value ? 'bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100' : 'text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-950'}`}>
+            <button key={a.id} type="button" onMouseDown={(e) => { e.preventDefault(); onChange(a.id); onCommittedPick?.(a.id); setOpen(false) }} className={`flex w-full rounded-md px-2.5 py-1.5 text-left text-[11px] font-medium transition-colors ${a.id === value ? 'bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100' : 'text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-950'}`}>
               {a.name}
             </button>
           ))}
@@ -957,20 +1200,40 @@ function InlineEditAccountDropdown({ value, accounts, onChange }: {
 // Inline searchable category dropdown (used in edit mode)
 // ---------------------------------------------------------------------------
 
-function InlineEditCategoryInput({ value, categories, onChange, onKeyDown }: {
-  value: string; categories: string[]; onChange: (v: string) => void; onKeyDown: (e: React.KeyboardEvent) => void
+function InlineEditCategoryInput({
+  value,
+  categories,
+  onChange,
+  onCommittedPick,
+  onKeyDown
+}: {
+  value: string
+  categories: string[]
+  onChange: (v: string) => void
+  onCommittedPick?: (category: string) => void
+  onKeyDown: (e: React.KeyboardEvent) => void
 }) {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(true)
+  const [filterQuery, setFilterQuery] = useState('')
   const [highlightIdx, setHighlightIdx] = useState(0)
   const dropdownRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
 
   const filtered = useMemo(() => {
-    if (!value.trim()) return categories
-    const lower = value.toLowerCase()
-    return categories.filter((c) => c.toLowerCase().includes(lower))
-  }, [categories, value])
+    const q = filterQuery.trim().toLowerCase()
+    if (!q) return categories
+    return categories.filter((c) => c.toLowerCase().includes(q))
+  }, [categories, filterQuery])
 
-  useEffect(() => { setHighlightIdx(0) }, [filtered])
+  useEffect(() => {
+    if (!filterQuery.trim() && value) {
+      const idx = filtered.findIndex((c) => c === value)
+      setHighlightIdx(idx >= 0 ? idx : 0)
+    } else {
+      setHighlightIdx(0)
+    }
+  }, [filtered, filterQuery, value])
+
   useEffect(() => {
     if (!open || !dropdownRef.current) return
     const el = dropdownRef.current.children[highlightIdx] as HTMLElement | undefined
@@ -978,41 +1241,104 @@ function InlineEditCategoryInput({ value, categories, onChange, onKeyDown }: {
   }, [highlightIdx, open])
 
   function handleKey(e: React.KeyboardEvent): void {
-    if (e.key === 'Escape') { setOpen(false); onKeyDown(e); return }
-    if (!open) { if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { setOpen(true); return } onKeyDown(e); return }
-    if (e.key === 'ArrowDown') { e.preventDefault(); setHighlightIdx((i) => Math.min(i + 1, filtered.length - 1)); return }
-    if (e.key === 'ArrowUp') { e.preventDefault(); setHighlightIdx((i) => Math.max(i - 1, 0)); return }
+    if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
+      e.preventDefault()
+      inputRef.current?.focus()
+      inputRef.current?.select()
+      return
+    }
+    if (e.key === 'Escape') {
+      setFilterQuery('')
+      setOpen(false)
+      onKeyDown(e)
+      return
+    }
+    if (!open) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        setOpen(true)
+        return
+      }
+      onKeyDown(e)
+      return
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      setHighlightIdx((i) => Math.min(i + 1, Math.max(0, filtered.length - 1)))
+      return
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      setHighlightIdx((i) => Math.max(i - 1, 0))
+      return
+    }
     if (e.key === 'Enter') {
       e.preventDefault()
-      if (filtered[highlightIdx]) onChange(filtered[highlightIdx])
+      let picked: string | null = null
+      if (filtered.length > 0 && filtered[highlightIdx]) picked = filtered[highlightIdx]
+      else {
+        const exact = categories.find((c) => c.toLowerCase() === filterQuery.trim().toLowerCase())
+        if (exact) picked = exact
+      }
+      if (picked) {
+        onChange(picked)
+        onCommittedPick?.(picked)
+      } else {
+        onKeyDown(e)
+      }
+      setFilterQuery('')
       setOpen(false)
       return
     }
     onKeyDown(e)
   }
 
+  const placeholder = value?.trim() ? value : 'Search categories…'
+
   return (
     <div className="relative min-w-0">
       <input
-        value={value}
-        onChange={(e) => { onChange(e.target.value); setOpen(true) }}
-        onFocus={() => setOpen(true)}
-        onBlur={() => { window.setTimeout(() => setOpen(false), 150) }}
+        ref={inputRef}
+        autoFocus
+        value={filterQuery}
+        onChange={(e) => {
+          setFilterQuery(e.target.value)
+          setOpen(true)
+        }}
+        onFocus={() => {
+          setOpen(true)
+        }}
+        onBlur={() => {
+          window.setTimeout(() => setOpen(false), 150)
+        }}
         onKeyDown={handleKey}
-        className="w-full min-w-0 rounded bg-zinc-50 px-1.5 py-0.5 text-sm outline-none ring-1 ring-zinc-200 dark:bg-zinc-800 dark:ring-zinc-700"
+        placeholder={placeholder}
+        className="w-full min-w-0 rounded bg-zinc-50 px-1.5 py-0.5 text-sm outline-none ring-1 ring-zinc-200 placeholder:text-zinc-400 dark:bg-zinc-800 dark:ring-zinc-700 dark:placeholder:text-zinc-500"
       />
-      {open && filtered.length > 0 && (
-        <div ref={dropdownRef} className="absolute left-0 top-full z-40 mt-1 max-h-[180px] w-[200px] overflow-y-auto rounded-lg border border-zinc-200 bg-white p-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
-          {filtered.map((cat, i) => (
-            <button
-              key={cat}
-              type="button"
-              onMouseDown={(e) => { e.preventDefault(); onChange(cat); setOpen(false) }}
-              className={`flex w-full rounded-md px-2.5 py-1.5 text-left text-[12px] font-medium transition-colors ${i === highlightIdx ? 'bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100' : 'text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-950'}`}
-            >
-              {cat}
-            </button>
-          ))}
+      {open && (
+        <div
+          ref={dropdownRef}
+          className="absolute left-0 top-full z-40 mt-1 max-h-[min(280px,42vh)] w-[min(240px,calc(100vw-220px-2rem))] overflow-y-auto rounded-lg border border-zinc-200 bg-white p-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900"
+        >
+          {filtered.length === 0 ? (
+            <div className="px-2.5 py-2 text-[12px] text-zinc-500 dark:text-zinc-400">No categories match.</div>
+          ) : (
+            filtered.map((cat, i) => (
+              <button
+                key={cat}
+                type="button"
+                onMouseDown={(ev) => {
+                  ev.preventDefault()
+                  onChange(cat)
+                  onCommittedPick?.(cat)
+                  setFilterQuery('')
+                  setOpen(false)
+                }}
+                className={`flex w-full rounded-md px-2.5 py-1.5 text-left text-[12px] font-medium transition-colors ${i === highlightIdx ? 'bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100' : 'text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-950'}`}
+              >
+                {cat}
+              </button>
+            ))
+          )}
         </div>
       )}
     </div>

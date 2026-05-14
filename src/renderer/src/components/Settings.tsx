@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { Account, AccountType, AiPromptSettings, BackupFile, BudgetItem, CategoryMappingRule, ModelInfo } from '../../../types/money'
+import type { Account, AccountType, AiPromptSettings, AiProvider, AiProviderState, BackupFile, BudgetItem, CategoryMappingRule } from '../../../types/money'
 import { BUDGET_CATEGORY_ALLOWLIST, BUDGET_CATEGORY_ORDER } from '../../../types/budgetCategories'
 import { useAppContext } from '../context/AppContext'
 import { useDateFormat } from '../context/DateFormatContext'
@@ -120,7 +120,6 @@ function ImportRulesFramework() {
   const [venmoOpen, setVenmoOpen] = useState(false)
   const [creditOpen, setCreditOpen] = useState(false)
   const [checkingOpen, setCheckingOpen] = useState(false)
-  const [savingsOpen, setSavingsOpen] = useState(false)
   const [incomeOpen, setIncomeOpen] = useState(false)
 
   return (
@@ -153,17 +152,12 @@ function ImportRulesFramework() {
       </CollapsibleRuleSection>
 
       {/* Credit Cards */}
-      <CollapsibleRuleSection title="Credit Card Import Rules" subtitle="Capital One auto-detection; debit → negative, credit → positive" open={creditOpen} onToggle={() => setCreditOpen((v) => !v)}>
+      <CollapsibleRuleSection title="Capital One Import Rules" subtitle="Capital One auto-detection; debit → negative, credit → positive" open={creditOpen} onToggle={() => setCreditOpen((v) => !v)}>
         <p className="text-[11px] text-zinc-500 dark:text-zinc-400">Capital One CSVs are detected by column headers (Transaction Date, Posted Date, Card No., Debit, Credit). Autopay rows are skipped. Category mapping uses the bank&apos;s raw category field.</p>
       </CollapsibleRuleSection>
 
       {/* Checking */}
-      <CollapsibleRuleSection title="Checking Account Rules" subtitle="Chase and other checking account imports" open={checkingOpen} onToggle={() => setCheckingOpen((v) => !v)}>
-        <p className="text-[11px] text-zinc-400 dark:text-zinc-500">No custom rules yet. Imported transactions use the generic category mapping rules above.</p>
-      </CollapsibleRuleSection>
-
-      {/* Savings */}
-      <CollapsibleRuleSection title="Savings Account Rules" subtitle="Savings account import handling" open={savingsOpen} onToggle={() => setSavingsOpen((v) => !v)}>
+      <CollapsibleRuleSection title="Chase Import Rules" subtitle="Chase account imports" open={checkingOpen} onToggle={() => setCheckingOpen((v) => !v)}>
         <p className="text-[11px] text-zinc-400 dark:text-zinc-500">No custom rules yet. Imported transactions use the generic category mapping rules above.</p>
       </CollapsibleRuleSection>
 
@@ -263,7 +257,7 @@ function AccountsSection() {
   const [accounts, setAccounts] = useState<Account[]>([])
   const reload = (): void => { window.api.getAccounts().then(setAccounts) }
   useEffect(reload, [])
-  const types: AccountType[] = ['checking', 'savings', 'credit', 'venmo']
+  const types: AccountType[] = ['capital_one', 'venmo', 'ebt', 'chase']
 
   return (
     <Panel title="Accounts">
@@ -273,16 +267,23 @@ function AccountsSection() {
             <EditablePlain value={account.name} onSave={async (value) => { await window.api.updateAccount(account.id, { name: value }); reload(); bumpDataVersion(); }} />
             <div className="flex gap-1">
               {types.map((type) => (
-                <button key={type} type="button" onClick={async () => { await window.api.updateAccount(account.id, { type }); reload(); }} className={`rounded-full px-2 py-1 text-[11px] ${account.type === type ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950' : 'bg-white text-zinc-500 dark:bg-zinc-800'}`}>{type}</button>
+                <button key={type} type="button" onClick={async () => { await window.api.updateAccount(account.id, { type }); reload(); }} className={`rounded-full px-2 py-1 text-[11px] ${account.type === type ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950' : 'bg-white text-zinc-500 dark:bg-zinc-800'}`}>{accountTypeLabel(type)}</button>
               ))}
             </div>
             <input type="color" value={account.color} onChange={async (event) => { await window.api.updateAccount(account.id, { color: event.target.value }); reload(); }} className="h-7 w-12 bg-transparent" />
           </div>
         ))}
       </div>
-      <button type="button" onClick={async () => { await window.api.createAccount({ name: 'New Account' }); reload(); bumpDataVersion(); }} className="mt-3 rounded-full bg-zinc-100 px-3 py-1.5 text-[12px] font-medium dark:bg-zinc-800 dark:text-zinc-100">Add account</button>
+      <button type="button" onClick={async () => { await window.api.createAccount({ name: 'Capital One', type: 'capital_one' }); reload(); bumpDataVersion(); }} className="mt-3 rounded-full bg-zinc-100 px-3 py-1.5 text-[12px] font-medium dark:bg-zinc-800 dark:text-zinc-100">Add account</button>
     </Panel>
   )
+}
+
+function accountTypeLabel(type: AccountType): string {
+  if (type === 'capital_one') return 'Capital One'
+  if (type === 'venmo') return 'Venmo'
+  if (type === 'ebt') return 'EBT'
+  return 'Chase'
 }
 
 function DisplaySection() {
@@ -508,25 +509,106 @@ function FolderIcon() {
 }
 
 function AiModelSection() {
-  const [current, setCurrent] = useState('')
-  const [models, setModels] = useState<ModelInfo[]>([])
+  const [state, setState] = useState<AiProviderState | null>(null)
+  const [loadingProvider, setLoadingProvider] = useState<AiProvider | null>(null)
+  const [modelsOpen, setModelsOpen] = useState(false)
   const [error, setError] = useState('')
+
+  function reload(): void {
+    window.api.getAiProvider()
+      .then((next) => {
+        setState(next)
+        setError('')
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+  }
+
   useEffect(() => {
-    window.api.getModel().then(setCurrent)
-    window.api.getAvailableModels().then(setModels).catch((err) => setError(err instanceof Error ? err.message : String(err)))
+    reload()
   }, [])
+
+  async function selectProvider(provider: AiProvider): Promise<void> {
+    setLoadingProvider(provider)
+    setError('')
+    try {
+      const next = await window.api.setAiProvider(provider)
+      setState(next)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setLoadingProvider(null)
+    }
+  }
+
+  async function selectModel(id: string): Promise<void> {
+    if (!state) return
+    setError('')
+    const result = await window.api.setModel(id)
+    if (!result.success) {
+      setError(result.reason ?? 'Could not select model.')
+      return
+    }
+    setState({ ...state, model: id })
+  }
+
+  const provider = state?.provider ?? 'anthropic'
+  const configured = state?.configured ?? false
 
   return (
     <Panel title="AI Model">
-      <div className="mb-2 text-sm text-zinc-600 dark:text-zinc-300">Current: {current || 'Not loaded'}</div>
-      {error ? <div className="mb-2 text-[12px] text-red-600 dark:text-red-400">{error}</div> : null}
-      <div className="flex flex-wrap gap-2">
-        {models.map((model) => (
-          <button key={model.id} type="button" onClick={async () => { const result = await window.api.setModel(model.id); if (result.success) setCurrent(model.id); }} className={`rounded-full px-3 py-1 text-[12px] ${current === model.id ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950' : 'bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300'}`}>
-            {model.display_name || model.id}
-          </button>
-        ))}
+      <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400">Provider SDK</div>
+          <div className="mt-1 flex flex-wrap gap-1.5" role="group" aria-label="AI provider">
+            {(['anthropic', 'openai'] as const).map((item) => {
+              const active = provider === item
+              return (
+                <button
+                  key={item}
+                  type="button"
+                  onClick={() => void selectProvider(item)}
+                  aria-pressed={active}
+                  disabled={loadingProvider !== null}
+                  className={`rounded-full px-3 py-1.5 text-[12px] font-medium transition-colors ${
+                    active
+                      ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950'
+                      : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700'
+                  }`}
+                >
+                  {item === 'anthropic' ? 'Anthropic SDK' : 'OpenAI SDK'}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+        <div className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${configured ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300' : 'bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300'}`}>
+          {configured ? 'API key detected' : provider === 'anthropic' ? 'ANTHROPIC_API_KEY needed' : 'OPENAI_API_KEY needed'}
+        </div>
       </div>
+      <div className="mb-2 text-sm text-zinc-600 dark:text-zinc-300">Default model: {state?.models.find((model) => model.id === state.model)?.display_name ?? state?.model ?? 'Not loaded'}</div>
+      {error ? <div className="mb-2 text-[12px] text-red-600 dark:text-red-400">{error}</div> : null}
+      <button
+        type="button"
+        onClick={() => setModelsOpen((value) => !value)}
+        aria-expanded={modelsOpen}
+        className="mt-2 flex w-full items-center justify-between gap-2 rounded-lg border border-zinc-200/80 bg-zinc-50/80 px-3 py-2 text-left transition-colors hover:bg-zinc-100/90 dark:border-zinc-700/80 dark:bg-zinc-950/60 dark:hover:bg-zinc-800/55"
+      >
+        <span>
+          <span className="block text-[11px] font-semibold text-zinc-700 dark:text-zinc-200">Default chat model</span>
+          <span className="mt-0.5 block text-[11px] text-zinc-500 dark:text-zinc-400">Expand to choose which model new chats use for the selected SDK.</span>
+        </span>
+        <SettingsChevronIcon expanded={modelsOpen} />
+      </button>
+      {modelsOpen ? (
+        <div className="mt-2 flex flex-wrap gap-2 rounded-lg border border-zinc-100 bg-white/60 px-3 py-3 dark:border-zinc-700/80 dark:bg-zinc-950/40">
+          {state?.models.map((model) => (
+            <button key={model.id} type="button" onClick={() => void selectModel(model.id)} className={`rounded-full px-3 py-1 text-[12px] ${state.model === model.id ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950' : 'bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300'}`}>
+              {model.display_name || model.id}
+            </button>
+          ))}
+          {state && state.models.length === 0 ? <span className="text-[12px] text-zinc-400">No models loaded.</span> : null}
+        </div>
+      ) : null}
     </Panel>
   )
 }
