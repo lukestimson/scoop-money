@@ -34,7 +34,7 @@ const CREATE_ACCOUNTS = `
 CREATE TABLE IF NOT EXISTS accounts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
-  type TEXT NOT NULL DEFAULT 'checking',
+  type TEXT NOT NULL DEFAULT 'chase',
   institution TEXT DEFAULT '',
   color TEXT DEFAULT '#a1a1aa',
   created_at INTEGER NOT NULL
@@ -111,6 +111,7 @@ CREATE TABLE IF NOT EXISTS income_entries (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   shoot_name TEXT NOT NULL DEFAULT '',
   company TEXT DEFAULT '',
+  income_type TEXT NOT NULL DEFAULT '',
   date INTEGER NOT NULL,
   amount INTEGER NOT NULL DEFAULT 0,
   notes TEXT DEFAULT '',
@@ -627,10 +628,10 @@ const DEFAULT_TAX_SETTINGS: IncomeTaxSettings = {
 }
 
 const DEFAULT_ACCOUNTS: Array<Pick<Account, 'name' | 'type' | 'institution' | 'color'>> = [
-  { name: 'Checking', type: 'checking', institution: '', color: '#0ea5e9' },
-  { name: 'Savings', type: 'savings', institution: '', color: '#10b981' },
-  { name: 'Credit Card', type: 'credit', institution: '', color: '#ef4444' },
-  { name: 'Venmo', type: 'venmo', institution: '', color: '#8b5cf6' }
+  { name: 'Capital One', type: 'capital_one', institution: 'Capital One', color: '#ef4444' },
+  { name: 'Venmo', type: 'venmo', institution: 'Venmo', color: '#3b82f6' },
+  { name: 'EBT', type: 'ebt', institution: 'EBT', color: '#10b981' },
+  { name: 'Chase', type: 'chase', institution: 'Chase', color: '#0ea5e9' }
 ]
 
 const now = (): number => Math.floor(Date.now() / 1000)
@@ -653,7 +654,10 @@ export function initDatabase(userDataPath: string): void {
   database.exec(CREATE_CATEGORY_MAPPING_RULES)
   ensureBudgetLineItemsHasIsNeedColumn()
   ensureTransactionsHasIncomeCandidateColumn()
+  ensureIncomeEntriesHasIncomeTypeColumn()
   seedDefaults()
+  ensureCoreAccounts()
+  runDateOnlyUtcMigration()
   runMoneyBudgetAllowlistMigration()
   runBudgetLineNeedWorkbookMigration()
   runBudgetSectionNeedsWantsLabelsMigration()
@@ -736,6 +740,91 @@ function seedDefaults(): void {
     const insert = db.prepare('INSERT INTO income_tax_settings (key, value) VALUES (?, ?)')
     Object.entries(DEFAULT_TAX_SETTINGS).forEach(([key, value]) => insert.run(key, String(value)))
   }
+}
+
+function ensureCoreAccounts(): void {
+  const db = getDb()
+  const stamp = now()
+  const accounts = () => db.prepare('SELECT * FROM accounts ORDER BY id ASC').all().map(rowToAccount)
+  const takenIds = new Set<number>()
+
+  DEFAULT_ACCOUNTS.forEach((core) => {
+    const current = accounts()
+    const exact = current.find((account) => account.name.toLowerCase() === core.name.toLowerCase())
+    if (exact) {
+      takenIds.add(exact.id)
+      db.prepare('UPDATE accounts SET type = ?, institution = ?, color = ? WHERE id = ?')
+        .run(core.type, core.institution, exact.color || core.color, exact.id)
+      return
+    }
+
+    const legacy = current.find((account) => !takenIds.has(account.id) && inferCoreAccountType(account) === core.type)
+    if (legacy) {
+      takenIds.add(legacy.id)
+      db.prepare('UPDATE accounts SET name = ?, type = ?, institution = ?, color = ? WHERE id = ?')
+        .run(core.name, core.type, core.institution, legacy.color || core.color, legacy.id)
+      return
+    }
+
+    db.prepare('INSERT INTO accounts (name, type, institution, color, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(core.name, core.type, core.institution, core.color, stamp)
+  })
+
+  const coreByType = new Map(accounts().filter((account) => isCoreAccount(account)).map((account) => [account.type, account]))
+  accounts()
+    .filter((account) => !isCoreAccount(account))
+    .forEach((account) => {
+      const targetType = inferCoreAccountType(account)
+      const target = coreByType.get(targetType) ?? coreByType.get('chase')
+      if (target) {
+        db.prepare('UPDATE transactions SET account_id = ? WHERE account_id = ?').run(target.id, account.id)
+        db.prepare('UPDATE imported_files SET account_id = ? WHERE account_id = ?').run(target.id, account.id)
+      }
+      db.prepare('DELETE FROM accounts WHERE id = ?').run(account.id)
+    })
+}
+
+function isCoreAccount(account: Account): boolean {
+  return DEFAULT_ACCOUNTS.some((core) => core.name === account.name && core.type === account.type)
+}
+
+function inferCoreAccountType(account: Account): AccountType {
+  const name = account.name.toLowerCase()
+  const rawType = String(account.type)
+  if (name.includes('capital') || name.includes('credit') || rawType === 'credit' || rawType === 'capital_one') return 'capital_one'
+  if (name.includes('venmo') || rawType === 'venmo') return 'venmo'
+  if (name.includes('ebt') || rawType === 'ebt') return 'ebt'
+  if (name.includes('chase') || name.includes('checking') || rawType === 'checking' || rawType === 'savings' || rawType === 'chase') return 'chase'
+  return 'chase'
+}
+
+function runDateOnlyUtcMigration(): void {
+  const db = getDb()
+  const flag = db.prepare('SELECT value FROM app_meta WHERE key = ?').get('money_local_date_only_noon_v1')
+  if (flag) return
+  shiftUtcMidnightDates('transactions', 'date')
+  shiftUtcMidnightDates('income_entries', 'date')
+  shiftUtcMidnightDates('imported_files', 'first_transaction_date')
+  shiftUtcMidnightDates('imported_files', 'last_transaction_date')
+  const stamp = now()
+  db.prepare(
+    `INSERT INTO app_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+  ).run('money_local_date_only_noon_v1', String(stamp))
+}
+
+function shiftUtcMidnightDates(table: string, column: string): void {
+  const db = getDb()
+  const rows = db.prepare(`SELECT id, ${column} AS value FROM ${table} WHERE ${column} IS NOT NULL AND ${column} > 0`).all() as Array<{ id: number; value: number }>
+  const update = db.prepare(`UPDATE ${table} SET ${column} = ? WHERE id = ?`)
+  rows.forEach((row) => {
+    if (row.value % 86400 !== 0) return
+    update.run(localNoonForUtcCalendarDate(row.value), row.id)
+  })
+}
+
+function localNoonForUtcCalendarDate(unix: number): number {
+  const date = new Date(unix * 1000)
+  return Math.floor(new Date(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 12, 0, 0, 0).getTime() / 1000)
 }
 
 function runWorkbookBudgetMigration(): void {
@@ -846,6 +935,30 @@ function ensureTransactionsHasIncomeCandidateColumn(): void {
   db.exec('ALTER TABLE transactions ADD COLUMN income_candidate INTEGER NOT NULL DEFAULT 0')
 }
 
+function inferIncomeTypeFromText(company: string, shootName: string, notes: string): string {
+  const haystack = `${company} ${shootName} ${notes}`.toLowerCase()
+  if (haystack.includes('snappr')) return 'Snappr'
+  if (haystack.includes('thumbtack')) return 'Thumbtack'
+  if (haystack.includes('upwork')) return 'Upwork'
+  return 'Stimsonphoto'
+}
+
+function ensureIncomeEntriesHasIncomeTypeColumn(): void {
+  const db = getDb()
+  const cols = db.prepare('PRAGMA table_info(income_entries)').all() as { name: string }[]
+  if (!cols.some((c) => c.name === 'income_type')) {
+    db.exec("ALTER TABLE income_entries ADD COLUMN income_type TEXT NOT NULL DEFAULT ''")
+  }
+  const rows = db
+    .prepare('SELECT id, company, shoot_name, notes, income_type FROM income_entries')
+    .all() as { id: number; company: string; shoot_name: string; notes: string; income_type: string }[]
+  const update = db.prepare('UPDATE income_entries SET income_type = ? WHERE id = ?')
+  for (const row of rows) {
+    if (String(row.income_type ?? '').trim()) continue
+    update.run(inferIncomeTypeFromText(String(row.company ?? ''), String(row.shoot_name ?? ''), String(row.notes ?? '')), row.id)
+  }
+}
+
 function ensureBudgetLineItemsHasIsNeedColumn(): void {
   const db = getDb()
   if (budgetLineItemsHasIsNeedColumn(db)) return
@@ -937,7 +1050,10 @@ function runBudgetSectionNeedsWantsLabelsMigration(): void {
 }
 
 function parseAccountType(value: unknown): AccountType {
-  return value === 'savings' || value === 'credit' || value === 'venmo' ? value : 'checking'
+  if (value === 'capital_one' || value === 'venmo' || value === 'ebt' || value === 'chase') return value
+  if (value === 'credit') return 'capital_one'
+  if (value === 'checking' || value === 'savings') return 'chase'
+  return 'chase'
 }
 
 function parseSource(value: unknown): TransactionSource {
@@ -1060,6 +1176,7 @@ function rowToIncomeEntry(row: unknown): IncomeEntry {
     id: Number(r.id),
     shoot_name: String(r.shoot_name ?? ''),
     company: String(r.company ?? ''),
+    income_type: String(r.income_type ?? ''),
     date: Number(r.date ?? 0),
     amount: Number(r.amount ?? 0),
     notes: String(r.notes ?? ''),
@@ -1476,7 +1593,7 @@ export function getAllAccounts(): Account[] {
   return getDb().prepare('SELECT * FROM accounts ORDER BY id ASC').all().map(rowToAccount)
 }
 
-export function getOrCreateAccountByName(name: string, type: Account['type'] = 'checking'): Account {
+export function getOrCreateAccountByName(name: string, type: Account['type'] = 'chase'): Account {
   const row = getDb().prepare('SELECT * FROM accounts WHERE LOWER(name) = LOWER(?)').get(name)
   if (row) return rowToAccount(row)
   return createAccount({ name, type })
@@ -1486,7 +1603,7 @@ export function createAccount(data: Partial<Account>): Account {
   const stamp = now()
   const result = getDb()
     .prepare('INSERT INTO accounts (name, type, institution, color, created_at) VALUES (?, ?, ?, ?, ?)')
-    .run(data.name ?? 'New Account', data.type ?? 'checking', data.institution ?? '', data.color ?? '#a1a1aa', stamp)
+    .run(data.name ?? 'Chase', data.type ?? 'chase', data.institution ?? '', data.color ?? '#a1a1aa', stamp)
   return getAccountById(Number(result.lastInsertRowid))
 }
 
@@ -1521,22 +1638,27 @@ export function getAllIncomeEntries(): IncomeEntry[] {
 
 export function createIncomeEntry(data: Partial<IncomeEntry>): IncomeEntry {
   const stamp = now()
+  const company = data.company ?? ''
+  const shootName = data.shoot_name ?? ''
+  const notes = data.notes ?? ''
+  const incomeType = String(data.income_type ?? '').trim() || inferIncomeTypeFromText(company, shootName, notes)
   const result = getDb()
     .prepare(
-      `INSERT INTO income_entries (shoot_name, company, date, amount, notes, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO income_entries (shoot_name, company, income_type, date, amount, notes, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(data.shoot_name ?? '', data.company ?? '', data.date ?? stamp, Math.round(data.amount ?? 0), data.notes ?? '', stamp, stamp)
+    .run(shootName, company, incomeType, data.date ?? stamp, Math.round(data.amount ?? 0), notes, stamp, stamp)
   return getIncomeEntryById(Number(result.lastInsertRowid))
 }
 
 export function updateIncomeEntry(id: number, data: Partial<IncomeEntry>): IncomeEntry {
   const existing = getIncomeEntryById(id)
   getDb()
-    .prepare('UPDATE income_entries SET shoot_name = ?, company = ?, date = ?, amount = ?, notes = ?, updated_at = ? WHERE id = ?')
+    .prepare('UPDATE income_entries SET shoot_name = ?, company = ?, income_type = ?, date = ?, amount = ?, notes = ?, updated_at = ? WHERE id = ?')
     .run(
       data.shoot_name ?? existing.shoot_name,
       data.company ?? existing.company,
+      data.income_type ?? existing.income_type,
       data.date ?? existing.date,
       Math.round(data.amount ?? existing.amount),
       data.notes ?? existing.notes,

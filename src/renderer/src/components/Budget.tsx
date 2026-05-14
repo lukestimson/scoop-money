@@ -3,7 +3,6 @@ import type { BudgetLineItem, BudgetSupportScope } from '../../../types/money'
 import { BUDGET_CATEGORY_ALLOWLIST, BUDGET_CATEGORY_ORDER } from '../../../types/budgetCategories'
 import { categoryNeedKindFromLines, inferLineIsNeed } from '../../../types/budgetNeedRules'
 import { useAppContext } from '../context/AppContext'
-import { useChat } from '../context/ChatContext'
 import {
   BUDGET_CATEGORY_SORT_KEY,
   BUDGET_PERIOD_KEY,
@@ -17,6 +16,7 @@ import {
 } from '../lib/budget'
 import { formatCurrency, parseCurrencyInput } from '../lib/currency'
 import { ChatBox } from './ChatBox'
+import { ListSectionSearchBar, type ListSearchPhase } from './ListSectionSearchBar'
 
 type LineNeedFilter = 'all' | 'needs' | 'wants'
 type LineEditField = 'label' | 'amount' | 'all'
@@ -75,6 +75,46 @@ function lineMonthlyForAidMode(line: BudgetLineItem, aidActive: Set<string>): nu
 
 function isParentalGovLine(line: BudgetLineItem): boolean {
   return line.section === 'Parental & Gov Help'
+}
+
+function budgetCategoryMatchesPhase2(
+  category: string,
+  needle: string,
+  lineItems: BudgetLineItem[],
+  categoryMonthlyCents: number,
+  period: BudgetDisplayPeriod,
+  aidFilters: Set<string>
+): boolean {
+  const q = needle.trim().toLowerCase()
+  if (!needle.trim()) return true
+  if (category.toLowerCase().includes(q)) return true
+  const scaledTotal = scaleMonthlyAmountToPeriod(categoryMonthlyCents, period)
+  const formatted = formatCurrency(scaledTotal).toLowerCase()
+  if (formatted.includes(q)) return true
+  const plain = String(scaledTotal)
+  if (plain.includes(q)) return true
+  const digits = q.replace(/[^\d.-]/g, '')
+  if (digits.length > 0 && (plain.includes(digits) || formatted.includes(digits))) return true
+
+  const lines = lineItems.filter((l) => l.category === category && !isParentalGovLine(l))
+  for (const line of lines) {
+    const monthly = lineMonthlyForAidMode(line, aidFilters)
+    const scaledLine = scaleMonthlyAmountToPeriod(monthly, period)
+    const blob = [
+      line.label,
+      line.section,
+      line.notes,
+      formatCurrency(scaledLine),
+      String(monthly),
+      String(line.annual_amount),
+      line.support_scope,
+      line.is_need ? 'need' : 'want'
+    ]
+      .join(' ')
+      .toLowerCase()
+    if (blob.includes(q)) return true
+  }
+  return false
 }
 
 function loadCustomCategories(): string[] {
@@ -182,8 +222,6 @@ function FilterPill({ label, active, tone, onClick }: { label: string; active: b
 
 export function Budget() {
   const { dataVersion, bumpDataVersion } = useAppContext()
-  const { getChat } = useChat()
-  const [chatExpanded, setChatExpanded] = useState(false)
   const [period, setPeriod] = useState<BudgetDisplayPeriod>(() => getStoredBudgetPeriod())
   const [lineItems, setLineItems] = useState<BudgetLineItem[]>([])
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
@@ -202,6 +240,9 @@ export function Budget() {
   const [categoryNameDraft, setCategoryNameDraft] = useState('')
   const [contextMenu, setContextMenu] = useState<{ category: string; x: number; y: number; confirming?: boolean } | null>(null)
   const [aidFilters, setAidFilters] = useState<Set<'parental' | 'government'>>(() => loadAidFilters())
+  const [budgetSearchFieldOpen, setBudgetSearchFieldOpen] = useState(false)
+  const [budgetSearchQuery, setBudgetSearchQuery] = useState('')
+  const [budgetSearchPhase, setBudgetSearchPhase] = useState<ListSearchPhase>(1)
 
   // Undo system
   const undoStackRef = useRef<UndoAction[]>([])
@@ -402,6 +443,39 @@ export function Budget() {
     return keys
   }, [allCategoryKeys, allCategorySet, categoryMonthlyTotals, categorySort, customOrder, period, sheetIndex])
 
+  const budgetPhase1Filtered = useMemo(() => {
+    const q = budgetSearchQuery.trim().toLowerCase()
+    if (!q) return sortedCategories
+    return sortedCategories.filter((cat) => cat.toLowerCase().includes(q))
+  }, [sortedCategories, budgetSearchQuery])
+
+  const budgetSearchFilteredCategories = useMemo(() => {
+    const q = budgetSearchQuery.trim().toLowerCase()
+    if (!q) return sortedCategories
+    if (budgetSearchPhase === 1) {
+      return sortedCategories.filter((cat) => cat.toLowerCase().includes(q))
+    }
+    return sortedCategories.filter((cat) =>
+      budgetCategoryMatchesPhase2(cat, budgetSearchQuery, lineItems, categoryMonthlyTotals.get(cat) ?? 0, period, aidFilters)
+    )
+  }, [sortedCategories, budgetSearchQuery, budgetSearchPhase, lineItems, categoryMonthlyTotals, period, aidFilters])
+
+  const budgetSearchShowEnterHint =
+    budgetSearchFieldOpen && budgetSearchPhase === 1 && Boolean(budgetSearchQuery.trim()) && budgetPhase1Filtered.length === 0
+
+  const handleBudgetSearchKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLInputElement>) => {
+      if (e.key !== 'Enter') return
+      e.preventDefault()
+      if (budgetSearchPhase !== 1) return
+      const q = budgetSearchQuery.trim()
+      if (!q) return
+      const any = sortedCategories.some((cat) => cat.toLowerCase().includes(q.toLowerCase()))
+      if (!any) setBudgetSearchPhase(2)
+    },
+    [budgetSearchPhase, budgetSearchQuery, sortedCategories]
+  )
+
   // --- Handlers ---
 
   function toggleExpanded(category: string): void {
@@ -425,7 +499,10 @@ export function Budget() {
   function commitNewCategory(name: string): void {
     if (!name.trim()) { setNewCategoryDraft(null); return }
     const trimmed = name.trim()
-    if (!userCategories.includes(trimmed) && !allCategorySet.has(trimmed)) setUserCategories((p) => [...p, trimmed])
+    if (!userCategories.includes(trimmed) && !allCategorySet.has(trimmed)) {
+      setUserCategories((p) => [...p, trimmed])
+      bumpDataVersion()
+    }
     setNewCategoryDraft(null)
     setExpanded((p) => new Set(p).add(trimmed))
     setCategorySort('custom')
@@ -435,8 +512,15 @@ export function Budget() {
 
   function enterCategoryEditMode(): void {
     setCategoryEditMode(true)
-    setExpanded(new Set())
   }
+
+  const expandAllCategories = useCallback(() => {
+    setExpanded(new Set(budgetSearchFilteredCategories))
+  }, [budgetSearchFilteredCategories])
+
+  const collapseAllCategories = useCallback(() => {
+    setExpanded(new Set())
+  }, [])
 
   function confirmCategoryEdits(): void {
     if (pendingDeletes.size > 0) {
@@ -500,7 +584,7 @@ export function Budget() {
   // --- Drag-and-drop ---
 
   function startCategoryDrag(e: React.PointerEvent, category: string): void {
-    if (categorySort !== 'custom' || categoryEditMode) return
+    if (categorySort !== 'custom' || categoryEditMode || budgetSearchQuery.trim()) return
     e.preventDefault()
     e.stopPropagation()
     const cats = sortedCategories
@@ -563,12 +647,9 @@ export function Budget() {
 
   // --- Render ---
 
-  const budgetChat = getChat('expenses-budget')
-  const chatFadeHeight = chatExpanded ? Math.min(budgetChat.height + 128, 680) : 96
-
   return (
-    <div className="relative h-full overflow-hidden bg-white dark:bg-zinc-950">
-      <div className="h-full overflow-y-auto px-4 py-6 pb-28 md:px-8">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-white dark:bg-zinc-950">
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-6 md:px-8">
         <div className="mb-4 md:hidden">
           <BudgetFilterRail needFilter={needFilter} onNeedFilter={setNeedFilter} />
         </div>
@@ -622,19 +703,64 @@ export function Budget() {
           <div className="min-w-0 md:col-start-2 md:row-start-2">
             {/* Edit categories + undo buttons */}
             <div className="mb-1 flex justify-end">
-              <div className="flex items-center gap-1">
-                {hasUndoActions && (
-                  <button type="button" onClick={() => void undoLastAction()} className="flex h-6 w-6 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200" aria-label="Undo (⌘Z)"><UndoIcon /></button>
-                )}
+              <div className="flex flex-wrap items-center justify-end gap-2">
                 {categoryEditMode ? (
-                  <button type="button" onClick={confirmCategoryEdits} className="flex h-6 w-6 items-center justify-center rounded-full text-emerald-600 transition-colors hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-950/30" aria-label="Confirm changes"><CheckIcon /></button>
+                  <>
+                    {expanded.size > 0 ? (
+                      <button
+                        type="button"
+                        onClick={collapseAllCategories}
+                        className="rounded-md px-2 py-1 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                      >
+                        Collapse All
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      onClick={expandAllCategories}
+                      className="rounded-md px-2 py-1 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                    >
+                      Expand All
+                    </button>
+                    {hasUndoActions ? (
+                      <button type="button" onClick={() => void undoLastAction()} className="flex h-6 w-6 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200" aria-label="Undo (⌘Z)"><UndoIcon /></button>
+                    ) : null}
+                    <button type="button" onClick={confirmCategoryEdits} className="flex h-6 w-6 items-center justify-center rounded-full text-emerald-600 transition-colors hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-950/30" aria-label="Confirm changes"><CheckIcon /></button>
+                  </>
                 ) : (
-                  <button type="button" onClick={enterCategoryEditMode} className="flex h-6 w-6 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200" aria-label="Edit categories"><PencilIcon /></button>
+                  <>
+                    {hasUndoActions ? (
+                      <button type="button" onClick={() => void undoLastAction()} className="flex h-6 w-6 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200" aria-label="Undo (⌘Z)"><UndoIcon /></button>
+                    ) : null}
+                    <button type="button" onClick={enterCategoryEditMode} className="flex h-6 w-6 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200" aria-label="Edit categories"><PencilIcon /></button>
+                  </>
                 )}
               </div>
             </div>
 
             <section className="overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
+              <div className="border-b border-zinc-100 bg-zinc-50/50 px-2 py-1.5 dark:border-zinc-800 dark:bg-zinc-950/40">
+                <ListSectionSearchBar
+                  placeholder="Search budget categories..."
+                  value={budgetSearchQuery}
+                  onChange={(v) => {
+                    setBudgetSearchQuery(v)
+                    setBudgetSearchPhase(1)
+                  }}
+                  fieldOpen={budgetSearchFieldOpen}
+                  onFieldOpen={() => setBudgetSearchFieldOpen(true)}
+                  onFieldClose={() => {
+                    setBudgetSearchFieldOpen(false)
+                    setBudgetSearchQuery('')
+                    setBudgetSearchPhase(1)
+                  }}
+                  phase={budgetSearchPhase}
+                  onPhaseReset={() => setBudgetSearchPhase(1)}
+                  showPressEnterHint={budgetSearchShowEnterHint}
+                  enterHintText="Press Enter to search all budget data"
+                  onInputKeyDown={handleBudgetSearchKeyDown}
+                />
+              </div>
               <div className="grid grid-cols-[24px_minmax(0,1fr)_24px_minmax(64px,76px)_minmax(96px,120px)_auto] items-center gap-2 border-b border-zinc-100 bg-zinc-50/80 px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950/50 dark:text-zinc-400 md:grid-cols-[28px_minmax(0,1fr)_24px_minmax(64px,76px)_minmax(96px,120px)_auto]">
                 <div aria-hidden="true" />
                 <div>Category</div>
@@ -643,8 +769,11 @@ export function Budget() {
                 <div className="text-right">Amount</div>
                 <div className="w-[56px]" aria-hidden="true" />
               </div>
-              {sortedCategories.map((category, idx) => {
-                const isExpanded = expanded.has(category) && !categoryEditMode
+              {sortedCategories.length > 0 && budgetSearchFilteredCategories.length === 0 ? (
+                <div className="px-4 py-10 text-center text-sm text-zinc-500 dark:text-zinc-400">No categories match your search.</div>
+              ) : (
+                budgetSearchFilteredCategories.map((category, idx) => {
+                const isExpanded = expanded.has(category)
                 const displayTotal = scaleMonthlyAmountToPeriod(categoryMonthlyTotals.get(category) ?? 0, period)
                 const visibleLines = linesByCategory.get(category) ?? []
                 const catKind = categoryKindByCategory.get(category) ?? 'empty'
@@ -662,7 +791,7 @@ export function Budget() {
                   >
                     <div className="flex items-stretch">
                       <div
-                        className={`flex w-7 shrink-0 items-center justify-center border-r border-transparent text-zinc-300 dark:text-zinc-600 ${categorySort === 'custom' && !categoryEditMode ? 'cursor-grab touch-none active:cursor-grabbing hover:text-zinc-500 dark:hover:text-zinc-400' : 'opacity-30'}`}
+                        className={`flex w-7 shrink-0 items-center justify-center border-r border-transparent text-zinc-300 dark:text-zinc-600 ${categorySort === 'custom' && !categoryEditMode && !budgetSearchQuery.trim() ? 'cursor-grab touch-none active:cursor-grabbing hover:text-zinc-500 dark:hover:text-zinc-400' : 'opacity-30'}`}
                         onPointerDown={(e) => startCategoryDrag(e, category)}
                       >
                         <GripIcon />
@@ -681,7 +810,15 @@ export function Budget() {
                           ) : (
                             <span className={`min-w-0 truncate font-semibold text-zinc-900 dark:text-zinc-100 ${isMarkedForDelete ? 'line-through' : ''}`}>{category}</span>
                           )}
-                          <span />
+                          <button
+                            type="button"
+                            onClick={() => toggleExpanded(category)}
+                            className="flex w-full items-center justify-center text-zinc-400 transition-colors hover:text-zinc-600 dark:text-zinc-500 dark:hover:text-zinc-300"
+                            aria-expanded={isExpanded}
+                            aria-label={isExpanded ? `Collapse ${category}` : `Expand ${category}`}
+                          >
+                            <ChevronIcon expanded={isExpanded} />
+                          </button>
                           <span className="flex justify-center"><NeedTypeChip kind={catKind} /></span>
                           <span className="text-right font-medium tabular-nums text-zinc-900 dark:text-zinc-100">{formatCurrency(displayTotal)}</span>
                           <div className="flex shrink-0 justify-end gap-1">
@@ -758,7 +895,8 @@ export function Budget() {
                     ) : null}
                   </div>
                 )
-              })}
+                })
+              )}
               {newCategoryDraft !== null ? (
                 <NewCategoryRow onCommit={commitNewCategory} onCancel={() => setNewCategoryDraft(null)} />
               ) : (
@@ -802,15 +940,8 @@ export function Budget() {
         </div>
       ) : null}
 
-      <div className="pointer-events-none absolute inset-x-8 bottom-4 z-20">
-        <div
-          aria-hidden="true"
-          style={{ height: chatFadeHeight }}
-          className="absolute inset-x-0 bottom-0 -z-10 bg-gradient-to-t from-white via-white/95 to-transparent transition-[height] duration-200 dark:from-zinc-950 dark:via-zinc-950/95"
-        />
-        <div className="pointer-events-auto">
-          <ChatBox pageId="expenses-budget" fullWidth onExpandedChange={setChatExpanded} />
-        </div>
+      <div className="shrink-0 border-t border-zinc-200 bg-white px-4 pb-2 pt-1 md:px-8 dark:border-zinc-800 dark:bg-zinc-950">
+        <ChatBox pageId="expenses-budget" fullWidth />
       </div>
     </div>
   )

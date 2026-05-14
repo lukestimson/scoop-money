@@ -27,7 +27,7 @@ export function Summary() {
   const chartData = months.map((month) => {
     const start = Math.floor(startOfMonth(month).getTime() / 1000)
     const end = Math.floor(endOfMonth(month).getTime() / 1000)
-    const spent = transactions.filter((tx) => tx.amount !== 0 && tx.date >= start && tx.date <= end).reduce((sum, tx) => sum + tx.amount, 0)
+    const spent = transactions.filter((tx) => tx.amount !== 0 && tx.date >= start && tx.date <= end).reduce((sum, tx) => sum - tx.amount, 0)
     const monthlyBudget = budget.reduce((sum, item) => sum + getBudgetAmount(item, getStoredBudgetType()), 0)
     return { month: format(month, 'MMM'), spent: spent / 100, budget: monthlyBudget / 100, spentCents: spent, budgetCents: monthlyBudget }
   })
@@ -80,7 +80,7 @@ export function Summary() {
                 {months.map((month) => {
                   const start = Math.floor(startOfMonth(month).getTime() / 1000)
                   const end = Math.floor(endOfMonth(month).getTime() / 1000)
-                  const spent = transactions.filter((tx) => tx.amount !== 0 && tx.mapped_category === item.category && tx.date >= start && tx.date <= end).reduce((sum, tx) => sum + tx.amount, 0)
+                  const spent = transactions.filter((tx) => tx.amount !== 0 && tx.mapped_category === item.category && tx.date >= start && tx.date <= end).reduce((sum, tx) => sum - tx.amount, 0)
                   const under = spent <= getBudgetAmount(item, getStoredBudgetType())
                   return (
                     <td key={month.toISOString()} className={`px-4 py-3 text-right ${under ? 'bg-emerald-50/40 text-emerald-800 dark:bg-emerald-950/10 dark:text-emerald-300' : 'bg-red-50/50 text-red-800 dark:bg-red-950/10 dark:text-red-300'}`}>

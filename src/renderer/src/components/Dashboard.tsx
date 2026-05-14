@@ -61,7 +61,7 @@ export function Dashboard() {
   const { start, end } = monthBounds()
   const monthSpent = transactions
     .filter((tx) => tx.amount !== 0 && tx.date >= start && tx.date <= end)
-    .reduce((sum, tx) => sum + tx.amount, 0)
+    .reduce((sum, tx) => sum - tx.amount, 0)
   const monthIncome = income
     .filter((entry) => entry.date >= start && entry.date <= end)
     .reduce((sum, entry) => sum + entry.amount, 0)

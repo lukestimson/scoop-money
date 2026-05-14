@@ -1,5 +1,8 @@
 @import "tailwindcss";
 
+/* Class-driven dark mode (ThemeContext toggles `dark` on <html>). Default v4 `dark:` uses prefers-color-scheme only. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 html,
 body,
 #root {
@@ -14,27 +17,28 @@ body {
   background: #ffffff;
 }
 
-@media (prefers-color-scheme: dark) {
-  body {
-    background: #09090b;
-  }
+.dark body {
+  background: #09090b;
+}
 
-  * {
-    scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
-  }
+.dark * {
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+}
 
-  ::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
-  }
-  ::-webkit-scrollbar-track {
-    background: transparent;
-  }
-  ::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.15);
-    border-radius: 9999px;
-  }
-  ::-webkit-scrollbar-thumb:hover {
-    background: rgba(255, 255, 255, 0.25);
-  }
+.dark ::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.dark ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 9999px;
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.25);
 }

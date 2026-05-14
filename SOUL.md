@@ -625,6 +625,8 @@ Fields should look like text until active:
 - `outline-none`
 - `focus:ring-0`
 
+Keep view and edit geometry aligned. When a value can switch from read-only to inline edit, preserve the same padding, alignment, line height, and width so the control does not shift or jitter. Prefer borderless inputs that sit in the same layout as the surrounding text instead of introducing new chrome that changes the box model.
+
 ### Dropdowns
 
 Do not use native `<select>` for product UI.

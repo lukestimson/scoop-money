@@ -1,22 +1,32 @@
-import { useEffect, useMemo, useState } from 'react'
-import type { MouseEvent, ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, MouseEvent, ReactNode } from 'react'
+import { addMonths, addWeeks, addYears, endOfMonth, endOfWeek, endOfYear, format, getDay, getDaysInMonth, startOfMonth, startOfWeek, startOfYear } from 'date-fns'
 import type { BudgetItem, ExpectedIncomeEntry, IncomeEntry, IncomeKind, IncomeTaxSettings } from '../../../types/money'
+import { parseLocalDateToUnix } from '../../../types/dateParsing'
 import { useAppContext } from '../context/AppContext'
 import { useDateFormat } from '../context/DateFormatContext'
 import { getBudgetAmount, getStoredBudgetType } from '../lib/budget'
 import { formatCurrency, parseCurrencyInput } from '../lib/currency'
-import { monthBounds } from '../lib/dates'
 import { calculateIncomeTaxes, groupActualIncomeByMonth } from '../lib/income'
 import { ChatBox } from './ChatBox'
+import { IncomeNotesPanel, type IncomeNotesPanelHandle } from './IncomeNotesPanel'
+import { IncomeTypeField, INCOME_TYPE_COLOR_EDITOR_SELECTOR, INCOME_TYPE_MENU_SELECTOR } from './IncomeTypeField'
+import { ListSectionSearchBar, type ListSearchPhase } from './ListSectionSearchBar'
+import { incomeTypeChipPresentation, readIncomeTypeColorHex, removeIncomeTypeColorHex, setIncomeTypeColorHex, subscribeIncomeTypeColors } from '../lib/incomeTypeColors'
 
 const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-const INCOME_TYPES = ['Snappr', 'Thumbtack', 'Upwork', 'Stimsonphoto'] as const
+const WEEKDAY_LABELS = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su']
+const DEFAULT_INCOME_TYPES = ['Snappr', 'Thumbtack', 'Upwork', 'Stimsonphoto'] as const
+const INCOME_CUSTOM_TYPES_KEY = 'scoop_income_custom_types'
+const INCOME_HIDDEN_TYPES_KEY = 'scoop_income_hidden_types'
 const INCOME_KIND_OPTIONS: Array<{ value: IncomeKind; label: string; detail: string }> = [
   { value: 'w2', label: 'W-2', detail: 'Payroll job' },
   { value: 'self_employment', label: 'Self-employed', detail: '1099 or freelance' },
   { value: 'other', label: 'Other', detail: 'Not payroll taxed here' }
 ]
-type IncomeTypeFilter = (typeof INCOME_TYPES)[number]
+type IncomeDisplayPeriod = 'week' | 'month' | 'year'
+type IncomeSortKey = 'date' | 'amount' | 'name' | 'recent'
+type IncomeEditField = 'date' | 'shoot_name' | 'company' | 'income_type' | 'amount' | 'notes' | null
 type ExplanationPoint = { label: string; value: string }
 type Explanation = {
   title: string
@@ -25,6 +35,76 @@ type Explanation = {
   points: ExplanationPoint[]
   x: number
   y: number
+}
+
+const INCOME_PERIOD_KEY = 'scoop_income_actual_period'
+const INCOME_SORT_KEY = 'scoop_income_actual_sort'
+const INCOME_ANCHOR_KEY = 'scoop_income_actual_anchor'
+const INCOME_SORT_OPTIONS: ReadonlyArray<{ id: IncomeSortKey; label: string }> = [
+  { id: 'date', label: 'Date' },
+  { id: 'amount', label: 'Amount' },
+  { id: 'name', label: 'Name' },
+  { id: 'recent', label: 'Recently Added' }
+]
+
+interface IncomeUndoAction {
+  type: 'create_entry' | 'delete_entry'
+  entryId?: number
+  entries?: IncomeEntry[]
+}
+
+function incomePeriodBounds(anchor: Date, period: IncomeDisplayPeriod): { start: number; end: number } {
+  if (period === 'week') {
+    const s = startOfWeek(anchor, { weekStartsOn: 1 })
+    const e = endOfWeek(anchor, { weekStartsOn: 1 })
+    return { start: Math.floor(s.getTime() / 1000), end: Math.floor(e.getTime() / 1000) }
+  }
+  if (period === 'year') {
+    const s = startOfYear(anchor)
+    const e = endOfYear(anchor)
+    return { start: Math.floor(s.getTime() / 1000), end: Math.floor(e.getTime() / 1000) }
+  }
+  const s = startOfMonth(anchor)
+  const e = endOfMonth(anchor)
+  return { start: Math.floor(s.getTime() / 1000), end: Math.floor(e.getTime() / 1000) }
+}
+
+function stepIncomeAnchor(anchor: Date, period: IncomeDisplayPeriod, dir: 1 | -1): Date {
+  if (period === 'week') return addWeeks(anchor, dir)
+  if (period === 'year') return addYears(anchor, dir)
+  return addMonths(anchor, dir)
+}
+
+function formatIncomeAnchor(anchor: Date, period: IncomeDisplayPeriod): string {
+  if (period === 'week') {
+    const s = startOfWeek(anchor, { weekStartsOn: 1 })
+    return `${format(s, 'MMM d')} - ${format(endOfWeek(anchor, { weekStartsOn: 1 }), 'MMM d, yyyy')}`
+  }
+  if (period === 'year') return format(anchor, 'yyyy')
+  return format(anchor, 'MMM yyyy')
+}
+
+function getStoredIncomePeriod(): IncomeDisplayPeriod {
+  const value = localStorage.getItem(INCOME_PERIOD_KEY)
+  if (value === 'week' || value === 'month' || value === 'year') return value
+  return 'month'
+}
+
+function getStoredIncomeSort(): IncomeSortKey {
+  const value = localStorage.getItem(INCOME_SORT_KEY)
+  if (value === 'date' || value === 'amount' || value === 'name' || value === 'company' || value === 'recent') {
+    return value === 'company' ? 'name' : value
+  }
+  return 'date'
+}
+
+function getStoredIncomeAnchor(): Date {
+  const value = localStorage.getItem(INCOME_ANCHOR_KEY)
+  if (value) {
+    const parsed = new Date(value)
+    if (!Number.isNaN(parsed.getTime())) return parsed
+  }
+  return new Date()
 }
 
 export function IncomeExpected() {
@@ -147,66 +227,493 @@ export function IncomeExpected() {
 
 export function IncomeActual() {
   const { dataVersion, bumpDataVersion } = useAppContext()
+  const { formatDate } = useDateFormat()
   const [entries, setEntries] = useState<IncomeEntry[]>([])
-  const [selectedTypes, setSelectedTypes] = useState<IncomeTypeFilter[]>([])
-  const { start, end } = monthBounds()
+  const [selectedTypes, setSelectedTypes] = useState<string[]>([])
+  const [customIncomeTypes, setCustomIncomeTypes] = useState<string[]>(() => loadCustomIncomeTypes())
+  const [hiddenIncomeTypes, setHiddenIncomeTypes] = useState<Set<string>>(() => loadHiddenIncomeTypes())
+  const [, setIncomeTypeColorRevision] = useState(0)
+  const [anchor, setAnchor] = useState(() => getStoredIncomeAnchor())
+  const [period, setPeriod] = useState<IncomeDisplayPeriod>(() => getStoredIncomePeriod())
+  const [sortKey, setSortKey] = useState<IncomeSortKey>(() => getStoredIncomeSort())
+  const [sortOpen, setSortOpen] = useState(false)
+  const [calendarOpen, setCalendarOpen] = useState(false)
+  const [adding, setAdding] = useState(false)
+  const [editMode, setEditMode] = useState(false)
+  const [deleteAllArmed, setDeleteAllArmed] = useState(false)
+  const [contextMenu, setContextMenu] = useState<{ entryId: number; x: number; y: number; confirming?: boolean } | null>(null)
+  const [hasUndoActions, setHasUndoActions] = useState(false)
+  const [incomeSearchFieldOpen, setIncomeSearchFieldOpen] = useState(false)
+  const [incomeSearchQuery, setIncomeSearchQuery] = useState('')
+  const [incomeSearchPhase, setIncomeSearchPhase] = useState<ListSearchPhase>(1)
+  const undoStackRef = useRef<IncomeUndoAction[]>([])
+  const sortRef = useRef<HTMLDivElement>(null)
+  const calendarRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    return subscribeIncomeTypeColors(() => {
+      setIncomeTypeColorRevision((value) => value + 1)
+    })
+  }, [])
+
+  const { start, end } = incomePeriodBounds(anchor, period)
 
   useEffect(() => {
     window.api.getIncomeEntries().then(setEntries)
   }, [dataVersion])
 
-  const monthEntries = useMemo(
+  useEffect(() => { localStorage.setItem(INCOME_PERIOD_KEY, period) }, [period])
+  useEffect(() => { localStorage.setItem(INCOME_SORT_KEY, sortKey) }, [sortKey])
+  useEffect(() => { localStorage.setItem(INCOME_ANCHOR_KEY, anchor.toISOString()) }, [anchor])
+
+  useEffect(() => {
+    if (!sortOpen) return
+    function onClickAway(e: PointerEvent): void { if (sortRef.current && !sortRef.current.contains(e.target as Node)) setSortOpen(false) }
+    function onEsc(e: KeyboardEvent): void { if (e.key === 'Escape') setSortOpen(false) }
+    document.addEventListener('pointerdown', onClickAway)
+    document.addEventListener('keydown', onEsc)
+    return () => { document.removeEventListener('pointerdown', onClickAway); document.removeEventListener('keydown', onEsc) }
+  }, [sortOpen])
+
+  useEffect(() => {
+    if (!calendarOpen) return
+    function onClickAway(e: PointerEvent): void { if (calendarRef.current && !calendarRef.current.contains(e.target as Node)) setCalendarOpen(false) }
+    function onEsc(e: KeyboardEvent): void { if (e.key === 'Escape') setCalendarOpen(false) }
+    document.addEventListener('pointerdown', onClickAway)
+    document.addEventListener('keydown', onEsc)
+    return () => { document.removeEventListener('pointerdown', onClickAway); document.removeEventListener('keydown', onEsc) }
+  }, [calendarOpen])
+
+  useEffect(() => {
+    if (!contextMenu) return
+    const close = () => setContextMenu(null)
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close() }
+    document.addEventListener('pointerdown', close)
+    document.addEventListener('keydown', onKey)
+    return () => { document.removeEventListener('pointerdown', close); document.removeEventListener('keydown', onKey) }
+  }, [contextMenu])
+
+  const periodEntries = useMemo(
     () => entries.filter((entry) => entry.date >= start && entry.date <= end),
     [end, entries, start]
   )
+  const incomeTypeOptions = useMemo(() => buildIncomeTypeOptions(entries, customIncomeTypes, hiddenIncomeTypes), [customIncomeTypes, entries, hiddenIncomeTypes])
+  const periodIncomeTypeOptions = useMemo(() => buildPeriodIncomeTypeOptions(periodEntries, hiddenIncomeTypes), [hiddenIncomeTypes, periodEntries])
   const visibleEntries = useMemo(
     () =>
-      monthEntries.filter((entry) => {
+      periodEntries.filter((entry) => {
         if (selectedTypes.length === 0) return true
-        return selectedTypes.includes(getIncomeType(entry))
+        if (!selectedTypes.includes(resolveIncomeType(entry))) return false
+        return true
       }),
-    [monthEntries, selectedTypes]
+    [periodEntries, selectedTypes]
   )
-  const monthTotal = monthEntries.reduce((sum, entry) => sum + entry.amount, 0)
-  const visibleTotal = visibleEntries.reduce((sum, entry) => sum + entry.amount, 0)
+  const sortedEntries = useMemo(
+    () => {
+      const list = [...visibleEntries]
+      if (sortKey === 'amount') return list.sort((a, b) => b.amount - a.amount)
+      if (sortKey === 'name') return list.sort((a, b) => {
+        const byName = (a.company || '').localeCompare(b.company || '')
+        return byName !== 0 ? byName : b.date - a.date
+      })
+      if (sortKey === 'recent') return list.sort((a, b) => b.id - a.id)
+      return list.sort((a, b) => b.date - a.date)
+    },
+    [visibleEntries, sortKey]
+  )
 
-  function toggleType(type: IncomeTypeFilter): void {
+  const incomePhase1Filtered = useMemo(() => {
+    const q = incomeSearchQuery.trim().toLowerCase()
+    if (!q) return sortedEntries
+    return sortedEntries.filter((entry) => `${entry.shoot_name} ${entry.company}`.toLowerCase().includes(q))
+  }, [sortedEntries, incomeSearchQuery])
+
+  const incomeSearchFiltered = useMemo(() => {
+    const q = incomeSearchQuery.trim().toLowerCase()
+    if (!q) return sortedEntries
+    if (incomeSearchPhase === 1) {
+      return sortedEntries.filter((entry) => `${entry.shoot_name} ${entry.company}`.toLowerCase().includes(q))
+    }
+    return sortedEntries.filter((entry) => {
+      const blob = [
+        entry.shoot_name,
+        entry.company,
+        resolveIncomeType(entry),
+        entry.notes,
+        formatCurrency(entry.amount),
+        String(entry.amount),
+        formatDate(entry.date)
+      ]
+        .join(' ')
+        .toLowerCase()
+      return blob.includes(q)
+    })
+  }, [formatDate, incomeSearchPhase, incomeSearchQuery, sortedEntries])
+
+  const incomeSearchShowEnterHint =
+    incomeSearchFieldOpen && incomeSearchPhase === 1 && Boolean(incomeSearchQuery.trim()) && incomePhase1Filtered.length === 0
+
+  const handleIncomeSearchKeyDown = useCallback(
+    (e: ReactKeyboardEvent<HTMLInputElement>) => {
+      if (e.key !== 'Enter') return
+      e.preventDefault()
+      if (incomeSearchPhase !== 1) return
+      const q = incomeSearchQuery.trim()
+      if (!q) return
+      const any = sortedEntries.some((entry) => `${entry.shoot_name} ${entry.company}`.toLowerCase().includes(q.toLowerCase()))
+      if (!any) setIncomeSearchPhase(2)
+    },
+    [incomeSearchPhase, incomeSearchQuery, sortedEntries]
+  )
+
+  useEffect(() => {
+    setSelectedTypes((current) => current.filter((type) => periodIncomeTypeOptions.includes(type)))
+  }, [periodIncomeTypeOptions])
+
+  const periodTotal = periodEntries.reduce((sum, entry) => sum + entry.amount, 0)
+  const visibleTotal = visibleEntries.reduce((sum, entry) => sum + entry.amount, 0)
+  const filteredTotalPresentation = incomeFilteredTotalPresentation(selectedTypes)
+
+  function toggleType(type: string): void {
     setSelectedTypes((current) => current.includes(type) ? current.filter((item) => item !== type) : [...current, type])
   }
 
+  const registerCustomIncomeType = useCallback((type: string): void => {
+    const trimmed = type.trim()
+    if (!trimmed) return
+    setCustomIncomeTypes((current) => {
+      if (current.includes(trimmed) || DEFAULT_INCOME_TYPES.includes(trimmed as (typeof DEFAULT_INCOME_TYPES)[number])) return current
+      const next = [...current, trimmed].sort((a, b) => a.localeCompare(b))
+      localStorage.setItem(INCOME_CUSTOM_TYPES_KEY, JSON.stringify(next))
+      return next
+    })
+    setHiddenIncomeTypes((current) => {
+      if (!current.has(trimmed)) return current
+      const next = new Set(current)
+      next.delete(trimmed)
+      saveHiddenIncomeTypes(next)
+      return next
+    })
+  }, [])
+
+  const unregisterCustomIncomeType = useCallback((type: string): void => {
+    const trimmed = type.trim()
+    if (!trimmed) return
+    setCustomIncomeTypes((current) => {
+      const next = current.filter((item) => item !== trimmed)
+      localStorage.setItem(INCOME_CUSTOM_TYPES_KEY, JSON.stringify(next))
+      return next
+    })
+    setSelectedTypes((current) => current.filter((item) => item !== trimmed))
+    setHiddenIncomeTypes((current) => {
+      const next = new Set(current)
+      next.add(trimmed)
+      saveHiddenIncomeTypes(next)
+      return next
+    })
+    const affected = entries.filter((entry) => entry.income_type.trim() === trimmed)
+    if (affected.length > 0) {
+      setEntries((current) => current.map((entry) => (
+        entry.income_type.trim() === trimmed ? { ...entry, income_type: '' } : entry
+      )))
+      void (async () => {
+        for (const entry of affected) {
+          await window.api.updateIncomeEntry(entry.id, { income_type: '' })
+        }
+        bumpDataVersion()
+      })()
+    }
+    removeIncomeTypeColorHex(trimmed)
+  }, [bumpDataVersion, entries])
+
+  const renameCustomIncomeType = useCallback((from: string, to: string): void => {
+    const fromTrimmed = from.trim()
+    const toTrimmed = to.trim()
+    if (!fromTrimmed || !toTrimmed || fromTrimmed === toTrimmed) return
+    if (DEFAULT_INCOME_TYPES.includes(toTrimmed as (typeof DEFAULT_INCOME_TYPES)[number])) return
+
+    setCustomIncomeTypes((current) => {
+      const withoutFrom = current.filter((item) => item !== fromTrimmed)
+      const next = withoutFrom.includes(toTrimmed) ? withoutFrom : [...withoutFrom, toTrimmed]
+      next.sort((a, b) => a.localeCompare(b))
+      localStorage.setItem(INCOME_CUSTOM_TYPES_KEY, JSON.stringify(next))
+      return next
+    })
+    setHiddenIncomeTypes((current) => {
+      const next = new Set(current)
+      next.add(fromTrimmed)
+      next.delete(toTrimmed)
+      saveHiddenIncomeTypes(next)
+      return next
+    })
+    setSelectedTypes((current) => current.map((item) => (item === fromTrimmed ? toTrimmed : item)))
+    const hex = readIncomeTypeColorHex(fromTrimmed)
+    if (hex) {
+      setIncomeTypeColorHex(toTrimmed, hex)
+      removeIncomeTypeColorHex(fromTrimmed)
+    }
+    setEntries((current) =>
+      current.map((entry) => (
+        entry.income_type.trim() === fromTrimmed ? { ...entry, income_type: toTrimmed } : entry
+      ))
+    )
+    const affected = entries.filter((entry) => entry.income_type.trim() === fromTrimmed)
+    if (affected.length > 0) {
+      void (async () => {
+        for (const entry of affected) {
+          await window.api.updateIncomeEntry(entry.id, { income_type: toTrimmed })
+        }
+        bumpDataVersion()
+      })()
+    }
+  }, [bumpDataVersion, entries])
+
+  function pushUndo(action: IncomeUndoAction): void {
+    undoStackRef.current.push(action)
+    setHasUndoActions(true)
+  }
+
+  const undoLastAction = useCallback(async () => {
+    const action = undoStackRef.current.pop()
+    if (!action) return
+    if (undoStackRef.current.length === 0) setHasUndoActions(false)
+    if (action.type === 'create_entry' && action.entryId) {
+      await window.api.deleteIncomeEntry(action.entryId)
+    } else if (action.type === 'delete_entry' && action.entries) {
+      for (const entry of action.entries) {
+        await window.api.createIncomeEntry({
+          shoot_name: entry.shoot_name,
+          company: entry.company,
+          income_type: entry.income_type,
+          date: entry.date,
+          amount: entry.amount,
+          notes: entry.notes
+        })
+      }
+    }
+    bumpDataVersion()
+  }, [bumpDataVersion])
+
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent): void {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault()
+        void undoLastAction()
+      }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [undoLastAction])
+
+  async function deleteEntry(id: number): Promise<void> {
+    const entry = entries.find((item) => item.id === id)
+    if (entry) pushUndo({ type: 'delete_entry', entries: [entry] })
+    await window.api.deleteIncomeEntry(id)
+    bumpDataVersion()
+  }
+
+  async function deleteAllIncomeEntries(): Promise<void> {
+    if (!deleteAllArmed) {
+      setDeleteAllArmed(true)
+      window.setTimeout(() => setDeleteAllArmed(false), 3500)
+      return
+    }
+    const toDelete = [...visibleEntries]
+    if (toDelete.length === 0) return
+    pushUndo({ type: 'delete_entry', entries: toDelete })
+    for (const entry of toDelete) {
+      await window.api.deleteIncomeEntry(entry.id)
+    }
+    setDeleteAllArmed(false)
+    bumpDataVersion()
+  }
+
+  const handleAddDone = useCallback((created?: IncomeEntry) => {
+    setAdding(false)
+    if (created) {
+      pushUndo({ type: 'create_entry', entryId: created.id })
+      bumpDataVersion()
+    }
+  }, [bumpDataVersion])
+
+  const hasFilterSelection = selectedTypes.length > 0
+
   return (
-    <div className="flex h-full flex-col gap-4 overflow-hidden px-8 py-8">
-      <div className="shrink-0">
-        <div className="flex items-center gap-2">
-          <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">Income Actual</h1>
-          <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] font-medium tabular-nums text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400" title={selectedTypes.length ? `${visibleEntries.length} of ${monthEntries.length} shown` : `${monthEntries.length} shown`}>
-            {visibleEntries.length}
-          </span>
-        </div>
-        <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">Logged income from shoots, lessons, and other paid work.</p>
-      </div>
-      <div className="shrink-0 rounded-xl border border-emerald-200 bg-emerald-50 p-4 dark:border-emerald-900 dark:bg-emerald-950/20">
-        <div className="text-[11px] font-medium uppercase tracking-[0.12em] text-emerald-700 dark:text-emerald-300">Total income this month</div>
-        <div className="mt-2 text-3xl font-semibold text-emerald-700 dark:text-emerald-300">{formatCurrency(monthTotal)}</div>
-        {selectedTypes.length ? <div className="mt-1 text-[12px] font-medium text-emerald-700/80 dark:text-emerald-300/80">Filtered: {formatCurrency(visibleTotal)}</div> : null}
-      </div>
-      <IncomeTypeFilterBar selected={selectedTypes} onToggle={toggleType} onClear={() => setSelectedTypes([])} />
-      <div className="flex-1 overflow-y-auto rounded-xl border border-zinc-200 bg-zinc-50/80 p-3 shadow-sm dark:border-zinc-700 dark:bg-zinc-950/40">
-        {monthEntries.length === 0 ? (
-          <div className="px-4 py-10 text-center text-sm text-zinc-500 dark:text-zinc-400">Paste a photo shoot summary in chat to add income</div>
-        ) : visibleEntries.length === 0 ? (
-          <div className="px-4 py-10 text-center text-sm text-zinc-500 dark:text-zinc-400">No income matches the selected filters.</div>
-        ) : (
-          <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-            {visibleEntries.map((entry) => <IncomeCard key={entry.id} entry={entry} onChanged={bumpDataVersion} />)}
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-white dark:bg-zinc-950">
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-6 md:px-8">
+        <div className="flex min-h-0 flex-col gap-5">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">Income Actual</h1>
+                <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] font-medium tabular-nums text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400" title={`${incomeSearchFiltered.length} visible of ${periodEntries.length} in period`}>
+                  {incomeSearchFiltered.length}
+                </span>
+              </div>
+              <div className="mt-2 flex items-end gap-6">
+                <div>
+                  <div className="text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400">Total Income</div>
+                  <div className="mt-1 text-2xl font-semibold tracking-tight text-emerald-700 tabular-nums dark:text-emerald-300">{formatCurrency(periodTotal)}</div>
+                </div>
+                <div className={hasFilterSelection ? '' : 'invisible'} aria-hidden={!hasFilterSelection}>
+                  <div className="text-[10px] font-medium uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400">Filtered Income</div>
+                  <div className="mt-1 text-lg font-semibold tracking-tight tabular-nums" style={filteredTotalPresentation.style}>{formatCurrency(visibleTotal)}</div>
+                </div>
+              </div>
+            </div>
+            <div className="flex flex-col items-end gap-2">
+              <div className="flex flex-wrap items-center gap-3">
+                <div ref={sortRef} className="relative">
+                  <button type="button" onClick={() => setSortOpen((value) => !value)} className="cursor-pointer rounded-full bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-200/80 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700">
+                    Sort: {INCOME_SORT_OPTIONS.find((option) => option.id === sortKey)?.label ?? 'Date'}
+                  </button>
+                  {sortOpen ? (
+                    <div role="menu" className="absolute right-0 z-30 mt-1 min-w-[11.5rem] rounded-lg border border-zinc-200/80 bg-white p-1 shadow-[0_4px_12px_rgba(0,0,0,0.12)] dark:border-zinc-600 dark:bg-zinc-900">
+                      {INCOME_SORT_OPTIONS.map((option) => (
+                        <button key={option.id} type="button" role="menuitem" onClick={() => { setSortKey(option.id); setSortOpen(false) }} className={`flex w-full rounded-md px-2.5 py-1.5 text-left text-[12px] font-medium transition-colors ${sortKey === option.id ? 'bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100' : 'text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-950'}`}>
+                          {option.label}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+                <div className="inline-flex rounded-full bg-zinc-100 p-0.5 dark:bg-zinc-800" role="group" aria-label="Income period">
+                  <SegmentedButton active={period === 'week'} onClick={() => setPeriod('week')}>Week</SegmentedButton>
+                  <SegmentedButton active={period === 'month'} onClick={() => setPeriod('month')}>Month</SegmentedButton>
+                  <SegmentedButton active={period === 'year'} onClick={() => setPeriod('year')}>Year</SegmentedButton>
+                </div>
+              </div>
+              <div ref={calendarRef} className="relative">
+                <div className="flex items-center rounded-full border border-zinc-200 bg-white text-sm shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
+                  <button type="button" onClick={() => setAnchor((value) => stepIncomeAnchor(value, period, -1))} className="px-3 py-1.5 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100" aria-label="Previous">
+                    <span className="inline-block -rotate-90"><ChevronIcon direction="up" /></span>
+                  </button>
+                  <div className="min-w-[120px] text-center text-[12px] font-medium text-zinc-700 dark:text-zinc-200">{formatIncomeAnchor(anchor, period)}</div>
+                  <button type="button" onClick={() => setCalendarOpen((value) => !value)} className="px-1 text-zinc-400 transition-colors hover:text-zinc-700 dark:text-zinc-500 dark:hover:text-zinc-200" aria-label="Open calendar"><CalendarIcon /></button>
+                  <button type="button" onClick={() => setAnchor((value) => stepIncomeAnchor(value, period, 1))} className="px-3 py-1.5 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100" aria-label="Next">
+                    <span className="inline-block rotate-90"><ChevronIcon direction="up" /></span>
+                  </button>
+                </div>
+                {calendarOpen ? <IncomeCalendarDropdown period={period} anchor={anchor} onSelect={(date) => { setAnchor(date); setCalendarOpen(false) }} /> : null}
+              </div>
+            </div>
           </div>
-        )}
+
+          <div className="min-w-0">
+              {periodIncomeTypeOptions.length > 0 ? (
+                <IncomeTypeFilterBar
+                  incomeTypes={periodIncomeTypeOptions}
+                  selectedTypes={selectedTypes}
+                  onToggleType={toggleType}
+                />
+              ) : null}
+          <section className="mt-3 flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
+              <div className="relative flex items-start gap-2 px-4 pb-1 pt-2">
+                <div className="flex min-w-0 flex-1 items-start justify-start">
+                  <ListSectionSearchBar
+                  placeholder="Search income..."
+                  value={incomeSearchQuery}
+                  onChange={(value) => {
+                    setIncomeSearchQuery(value)
+                    setIncomeSearchPhase(1)
+                  }}
+                  fieldOpen={incomeSearchFieldOpen}
+                  onFieldOpen={() => setIncomeSearchFieldOpen(true)}
+                  onFieldClose={() => {
+                    setIncomeSearchFieldOpen(false)
+                    setIncomeSearchQuery('')
+                    setIncomeSearchPhase(1)
+                  }}
+                  phase={incomeSearchPhase}
+                  onPhaseReset={() => setIncomeSearchPhase(1)}
+                  showPressEnterHint={incomeSearchShowEnterHint}
+                  enterHintText="Press Enter to search all income data"
+                  onInputKeyDown={handleIncomeSearchKeyDown}
+                />
+                </div>
+                <div className="pointer-events-none absolute left-1/2 top-2 flex -translate-x-1/2 items-center">
+                  <button type="button" onClick={() => setAdding(true)} className="pointer-events-auto flex h-7 w-7 items-center justify-center rounded-full border border-zinc-200 bg-white text-zinc-500 shadow-sm transition-colors hover:border-zinc-300 hover:bg-zinc-50 hover:text-zinc-800 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-300 dark:shadow-none dark:hover:border-zinc-500 dark:hover:bg-zinc-800 dark:hover:text-zinc-100" aria-label="Add income"><PlusIcon /></button>
+                </div>
+                <div className="flex min-w-0 flex-1 items-start justify-end gap-1">
+                  {hasUndoActions ? (
+                    <button type="button" onClick={() => void undoLastAction()} className="flex h-7 w-7 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200" aria-label="Undo (⌘Z)"><UndoIcon /></button>
+                  ) : null}
+                  {editMode ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => void deleteAllIncomeEntries()}
+                        className={`rounded-full px-2 py-1 text-[11px] font-medium transition-colors ${deleteAllArmed ? 'bg-red-50 text-red-700 ring-1 ring-inset ring-red-200 dark:bg-red-950/30 dark:text-red-300 dark:ring-red-900' : 'text-zinc-400 hover:text-red-600 dark:hover:text-red-300'}`}
+                      >
+                        {deleteAllArmed ? 'Confirm Delete All' : 'Delete All'}
+                      </button>
+                      <button type="button" onClick={() => { setEditMode(false); setDeleteAllArmed(false) }} className="flex h-7 w-7 items-center justify-center rounded-full text-emerald-600 transition-colors hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-950/30" aria-label="Done editing"><CheckIcon /></button>
+                    </>
+                  ) : (
+                    <button type="button" onClick={() => setEditMode(true)} className="flex h-7 w-7 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200" aria-label="Edit income"><PencilIcon /></button>
+                  )}
+                </div>
+              </div>
+              <div className="grid grid-cols-[90px_minmax(0,1fr)_130px_minmax(150px,max-content)_100px_64px] items-center gap-2 border-b border-zinc-100 bg-zinc-50/80 px-4 py-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950/50 dark:text-zinc-400">
+                <div>Date</div>
+                <div>Shoot</div>
+                <div>Name</div>
+                <div>Type</div>
+                <div className="text-right">Amount</div>
+                <div aria-hidden="true" />
+              </div>
+              {adding ? <AddIncomeRow incomeTypes={incomeTypeOptions} onRegisterType={registerCustomIncomeType} onUnregisterType={unregisterCustomIncomeType} onRenameType={renameCustomIncomeType} onDone={handleAddDone} /> : null}
+              {periodEntries.length === 0 && !adding ? (
+                <div className="px-4 py-10 text-center text-sm text-zinc-500 dark:text-zinc-400">Paste a shoot summary in chat or add an income row.</div>
+              ) : visibleEntries.length === 0 && !adding ? (
+                <div className="px-4 py-10 text-center text-sm text-zinc-500 dark:text-zinc-400">No income matches the selected filters.</div>
+              ) : incomeSearchFiltered.length === 0 && !adding ? (
+                <div className="px-4 py-10 text-center text-sm text-zinc-500 dark:text-zinc-400">No income matches your search.</div>
+              ) : (
+                incomeSearchFiltered.map((entry) => (
+                  <IncomeRow
+                    key={entry.id}
+                    entry={entry}
+                    incomeTypes={incomeTypeOptions}
+                    onRegisterType={registerCustomIncomeType}
+                    onUnregisterType={unregisterCustomIncomeType}
+                    onRenameType={renameCustomIncomeType}
+                    editMode={editMode}
+                    onChanged={bumpDataVersion}
+                    onDelete={() => deleteEntry(entry.id)}
+                    onContextMenu={(event) => { event.preventDefault(); setContextMenu({ entryId: entry.id, x: event.clientX, y: event.clientY }) }}
+                  />
+                ))
+              )}
+            </section>
+
+            {contextMenu ? (
+              <div
+                className="fixed z-[100] min-w-[120px] overflow-hidden rounded-lg border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900"
+                style={{ left: contextMenu.x, top: contextMenu.y }}
+                onPointerDown={(event) => event.stopPropagation()}
+              >
+                {contextMenu.confirming ? (
+                  <>
+                    <button type="button" onClick={async () => { await deleteEntry(contextMenu.entryId); setContextMenu(null) }} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30">Delete</button>
+                    <button type="button" onClick={() => setContextMenu(null)} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-zinc-500 hover:bg-zinc-50 dark:text-zinc-400 dark:hover:bg-zinc-800">Cancel</button>
+                  </>
+                ) : (
+                  <button type="button" onClick={() => setContextMenu({ ...contextMenu, confirming: true })} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30">
+                    <XIcon />Delete
+                  </button>
+                )}
+              </div>
+            ) : null}
+          </div>
+        </div>
       </div>
-      <ChatBox pageId="income-actual" fullWidth />
+      <div className="shrink-0 border-t border-zinc-200 bg-white px-4 pb-2 pt-1 md:px-8 dark:border-zinc-800 dark:bg-zinc-950">
+        <ChatBox pageId="income-actual" fullWidth />
+      </div>
     </div>
   )
 }
-
 export function IncomeSummary() {
   const { dataVersion } = useAppContext()
   const [expected, setExpected] = useState<ExpectedIncomeEntry[]>([])
@@ -639,101 +1146,534 @@ function ExplanationPopover({ explanation, onClose }: { explanation: Explanation
   )
 }
 
-function IncomeTypeFilterBar({ selected, onToggle, onClear }: { selected: IncomeTypeFilter[]; onToggle: (type: IncomeTypeFilter) => void; onClear: () => void }) {
+function SegmentedButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
   return (
-    <div className="sticky top-0 z-10 shrink-0 rounded-xl border border-zinc-200 bg-white/95 px-3 py-2 shadow-sm backdrop-blur dark:border-zinc-700 dark:bg-zinc-900/95">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-        <FilterGlyph label="Income type" />
-        <div className="flex min-w-0 flex-1 flex-wrap gap-1" role="group" aria-label="Income type filters">
-          {INCOME_TYPES.map((type) => (
-            <FilterPill key={type} label={type} active={selected.includes(type)} tone={incomeTone(type)} onClick={() => onToggle(type)} />
-          ))}
-        </div>
-        {selected.length ? (
-          <button type="button" onClick={onClear} className="ml-auto rounded-full px-2 py-1 text-[11px] font-medium text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200">
-            Clear
-          </button>
-        ) : null}
+    <button type="button" onClick={onClick} className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${active ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-zinc-100' : 'text-zinc-500 dark:text-zinc-400'}`}>
+      {children}
+    </button>
+  )
+}
+
+function IncomeTypeFilterBar({
+  incomeTypes,
+  selectedTypes,
+  onToggleType
+}: {
+  incomeTypes: string[]
+  selectedTypes: string[]
+  onToggleType: (type: string) => void
+}) {
+  return (
+    <div className="flex min-w-0 flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
+      <div className="shrink-0 border-b border-zinc-100 bg-zinc-50/80 px-4 py-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950/50 dark:text-zinc-400">Filters</div>
+      <div className="flex min-w-0 items-center gap-1 overflow-x-auto px-3 py-2" role="group" aria-label="Income type filters">
+        {incomeTypes.map((type) => (
+          <IncomeTypeFilterPill key={type} type={type} active={selectedTypes.includes(type)} onClick={() => onToggleType(type)} />
+        ))}
       </div>
     </div>
   )
 }
 
-function IncomeCard({ entry, onChanged }: { entry: IncomeEntry; onChanged: () => void }) {
-  const [expanded, setExpanded] = useState(false)
-  const [field, setField] = useState<'shoot_name' | 'company' | 'amount' | 'notes' | null>(null)
-  const [draft, setDraft] = useState('')
-  const { formatDate } = useDateFormat()
-
-  function startEdit(next: typeof field, value: string): void {
-    setField(next)
-    setDraft(value)
-  }
-
-  async function save(): Promise<void> {
-    if (!field) return
-    await window.api.updateIncomeEntry(entry.id, {
-      [field]: field === 'amount' ? parseCurrencyInput(draft) : draft
-    })
-    setField(null)
-    onChanged()
-  }
-
+function IncomeTypeFilterPill({ type, active, onClick }: { type: string; active: boolean; onClick: () => void }) {
+  const activePresentation = active
+    ? incomeTypeChipPresentation(
+      type,
+      `inline-flex shrink-0 whitespace-nowrap rounded-md px-2 py-1 text-left text-[11px] font-semibold uppercase tracking-[0.06em] ring-1 ring-inset transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-300 ${incomeBadgeClass(type)}`
+    )
+    : null
   return (
-    <article className="rounded-lg border border-zinc-200 bg-white p-4 shadow-sm transition-colors hover:border-zinc-300 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:border-zinc-600">
-      <div className="grid grid-cols-[1fr_112px] gap-3">
-        <div>
-          {field === 'shoot_name' ? (
-            <input autoFocus value={draft} onChange={(e) => setDraft(e.target.value)} onBlur={save} onKeyDown={(e) => e.key === 'Enter' && save()} className="w-full bg-transparent font-medium outline-none" />
-          ) : (
-            <button type="button" onDoubleClick={() => startEdit('shoot_name', entry.shoot_name)} className="text-left font-semibold text-zinc-900 dark:text-zinc-100">{entry.shoot_name || 'Untitled income'}</button>
-          )}
-          {field === 'company' ? (
-            <input autoFocus value={draft} onChange={(e) => setDraft(e.target.value)} onBlur={save} onKeyDown={(e) => e.key === 'Enter' && save()} className="mt-1 w-full bg-transparent text-[12px] outline-none" />
-          ) : (
-            <button type="button" onDoubleClick={() => startEdit('company', entry.company)} className="mt-1 block text-left text-[12px] text-zinc-500 dark:text-zinc-400">{entry.company || 'No company'}</button>
-          )}
-        </div>
-        {field === 'amount' ? (
-          <input autoFocus value={draft} onChange={(e) => setDraft(e.target.value)} onBlur={save} onKeyDown={(e) => e.key === 'Enter' && save()} className="bg-transparent text-right font-semibold outline-none" />
-        ) : (
-          <button type="button" onDoubleClick={() => startEdit('amount', formatCurrency(entry.amount))} className="text-right font-semibold text-emerald-600">{formatCurrency(entry.amount)}</button>
-        )}
-      </div>
-      <div className="mt-3 flex flex-wrap items-center gap-2 text-[12px] text-zinc-500 dark:text-zinc-400">
-        <span className="rounded-full bg-zinc-100 px-2 py-0.5 dark:bg-zinc-800">{formatDate(entry.date)}</span>
-        <span className={`rounded-full px-2 py-0.5 ring-1 ring-inset ${incomeBadgeClass(getIncomeType(entry))}`}>{getIncomeType(entry)}</span>
-        <button type="button" onClick={() => setExpanded((value) => !value)} className="ml-auto rounded-full px-2 py-0.5 font-medium hover:bg-zinc-100 hover:text-zinc-800 dark:hover:bg-zinc-800 dark:hover:text-zinc-200">
-          {expanded ? 'Hide notes' : 'Show notes'}
-        </button>
-      </div>
-      {expanded ? (
-        field === 'notes' ? (
-          <textarea autoFocus value={draft} onChange={(e) => setDraft(e.target.value)} onBlur={save} className="mt-2 min-h-20 w-full resize-none rounded-lg border border-zinc-200 bg-transparent p-2 text-sm outline-none dark:border-zinc-700" />
-        ) : (
-          <button type="button" onDoubleClick={() => startEdit('notes', entry.notes)} className="mt-2 block w-full text-left text-sm text-zinc-700 dark:text-zinc-300">{entry.notes || 'No notes'}</button>
-        )
-      ) : null}
-    </article>
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      className={activePresentation?.className ?? 'inline-flex shrink-0 whitespace-nowrap rounded-md px-2 py-1 text-left text-[11px] font-semibold uppercase tracking-[0.06em] text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-300 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100'}
+      style={activePresentation?.style}
+    >
+      {type}
+    </button>
   )
 }
 
-function getIncomeType(entry: IncomeEntry): IncomeTypeFilter {
-  const haystack = `${entry.company} ${entry.shoot_name} ${entry.notes}`.toLowerCase()
-  if (haystack.includes('snappr')) return 'Snappr'
-  if (haystack.includes('thumbtack')) return 'Thumbtack'
-  if (haystack.includes('upwork')) return 'Upwork'
-  return 'Stimsonphoto'
+
+function IncomeRow({ entry, incomeTypes, onRegisterType, onUnregisterType, onRenameType, editMode, onChanged, onDelete, onContextMenu }: {
+  entry: IncomeEntry
+  incomeTypes: string[]
+  onRegisterType: (type: string) => void
+  onUnregisterType: (type: string) => void
+  onRenameType: (from: string, to: string) => void
+  editMode: boolean
+  onChanged: () => void
+  onDelete: () => Promise<void>
+  onContextMenu: (event: React.MouseEvent) => void
+}) {
+  const [activeField, setActiveField] = useState<IncomeEditField>(null)
+  const [notesOpen, setNotesOpen] = useState(false)
+  const [dateDraft, setDateDraft] = useState(formatIncomeDateInput(entry.date))
+  const [shootDraft, setShootDraft] = useState(entry.shoot_name)
+  const [companyDraft, setCompanyDraft] = useState(entry.company)
+  const [typeDraft, setTypeDraft] = useState(resolveIncomeType(entry))
+  const [amountDraft, setAmountDraft] = useState(formatCurrency(entry.amount))
+  const [notesDraft, setNotesDraft] = useState(entry.notes)
+  const rowRef = useRef<HTMLDivElement>(null)
+  const notesPanelRef = useRef<IncomeNotesPanelHandle>(null)
+  const savingRef = useRef(false)
+  const commitRef = useRef<() => void>(() => {})
+  const { formatDate } = useDateFormat()
+
+  useEffect(() => {
+    if (activeField) return
+    setDateDraft(formatIncomeDateInput(entry.date))
+    setShootDraft(entry.shoot_name)
+    setCompanyDraft(entry.company)
+    setTypeDraft(resolveIncomeType(entry))
+    setAmountDraft(formatCurrency(entry.amount))
+    setNotesDraft(entry.notes)
+  }, [activeField, entry])
+
+  const saveField = useCallback(async (): Promise<void> => {
+    if (savingRef.current) return
+    savingRef.current = true
+    try {
+      await window.api.updateIncomeEntry(entry.id, {
+        date: parseIncomeDateInput(dateDraft, entry.date),
+        shoot_name: shootDraft.trim(),
+        company: companyDraft.trim(),
+        income_type: typeDraft.trim(),
+        amount: parseCurrencyInput(amountDraft),
+        notes: notesDraft
+      })
+      onChanged()
+    } finally {
+      savingRef.current = false
+    }
+  }, [amountDraft, companyDraft, dateDraft, entry, notesDraft, onChanged, shootDraft, typeDraft])
+
+  const commitAndDeactivate = useCallback((): void => {
+    if (activeField === 'notes') {
+      const next = notesPanelRef.current?.save()
+      if (next !== undefined) setNotesDraft(next)
+      setActiveField(null)
+      return
+    }
+    void saveField()
+    setActiveField(null)
+  }, [activeField, saveField])
+  commitRef.current = commitAndDeactivate
+
+  useEffect(() => {
+    if (!activeField) return
+    const handler = (event: PointerEvent): void => {
+      const target = event.target
+      if (!(target instanceof Node)) return
+      if (rowRef.current?.contains(target)) return
+      if (target instanceof Element && target.closest(`${INCOME_TYPE_MENU_SELECTOR}, ${INCOME_TYPE_COLOR_EDITOR_SELECTOR}`)) return
+      commitRef.current()
+    }
+    document.addEventListener('pointerdown', handler, true)
+    return () => document.removeEventListener('pointerdown', handler, true)
+  }, [activeField])
+
+  function handleKeyDown(event: ReactKeyboardEvent): void {
+    if (event.key === 'Enter' && activeField !== 'notes') {
+      event.preventDefault()
+      commitAndDeactivate()
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      setDateDraft(formatIncomeDateInput(entry.date))
+      setShootDraft(entry.shoot_name)
+      setCompanyDraft(entry.company)
+      setTypeDraft(resolveIncomeType(entry))
+      setAmountDraft(formatCurrency(entry.amount))
+      setNotesDraft(entry.notes)
+      setActiveField(null)
+    }
+  }
+
+  function toggleNotes(): void {
+    if (notesOpen) {
+      if (activeField === 'notes') {
+        const next = notesPanelRef.current?.save()
+        if (next !== undefined) setNotesDraft(next)
+      }
+      setActiveField(null)
+      setNotesOpen(false)
+      return
+    }
+    setNotesOpen(true)
+  }
+
+  const resolvedType = resolveIncomeType(entry)
+  const unsetTypeClassName = 'inline-flex h-6 w-fit shrink-0 items-center whitespace-nowrap rounded-full px-2 text-[10px] font-semibold uppercase tracking-[0.06em] text-zinc-400 ring-1 ring-inset ring-zinc-200 bg-zinc-50 dark:bg-zinc-900/70 dark:text-zinc-500 dark:ring-zinc-800'
+  const typeChipPresentation = resolvedType
+    ? incomeTypeChipPresentation(
+      resolvedType,
+      `inline-flex h-6 w-fit shrink-0 items-center whitespace-nowrap rounded-full px-2 text-[10px] font-semibold uppercase tracking-[0.06em] ring-1 ring-inset ${incomeBadgeClass(resolvedType)}`
+    )
+    : { className: unsetTypeClassName, style: undefined }
+
+  return (
+    <div ref={rowRef} className="group/row border-b border-zinc-100 last:border-b-0 dark:border-zinc-800" onContextMenu={onContextMenu}>
+      <div className="grid grid-cols-[90px_minmax(0,1fr)_130px_minmax(150px,max-content)_100px_64px] items-center gap-2 px-4 py-2.5 text-sm">
+        {activeField === 'date' ? (
+          <input autoFocus value={dateDraft} onChange={(event) => setDateDraft(event.target.value)} onKeyDown={handleKeyDown} className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-sm tabular-nums text-zinc-900 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:ring-zinc-800" />
+        ) : (
+          <button type="button" onClick={() => setActiveField('date')} className="flex h-7 min-w-0 items-center text-left text-zinc-500 dark:text-zinc-400">{formatDate(entry.date)}</button>
+        )}
+
+        {activeField === 'shoot_name' ? (
+          <input autoFocus value={shootDraft} onChange={(event) => setShootDraft(event.target.value)} onKeyDown={handleKeyDown} className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-sm text-zinc-900 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:ring-zinc-800" />
+        ) : (
+          <button type="button" onClick={() => setActiveField('shoot_name')} className="flex h-7 min-w-0 items-center truncate text-left font-medium text-zinc-900 dark:text-zinc-100">{entry.shoot_name || 'Untitled income'}</button>
+        )}
+
+        {activeField === 'company' ? (
+          <input autoFocus value={companyDraft} onChange={(event) => setCompanyDraft(event.target.value)} onKeyDown={handleKeyDown} className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-sm text-zinc-900 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:ring-zinc-800" />
+        ) : (
+          <button type="button" onClick={() => setActiveField('company')} className="flex h-7 min-w-0 items-center truncate text-left text-zinc-500 dark:text-zinc-400">{entry.company || 'No name'}</button>
+        )}
+
+        {activeField === 'income_type' ? (
+          <IncomeTypeField
+            value={typeDraft}
+            incomeTypes={incomeTypes}
+            onChange={setTypeDraft}
+            onRegisterType={onRegisterType}
+            onUnregisterType={onUnregisterType}
+            onRenameType={onRenameType}
+            onCommittedPick={(type) => {
+              setTypeDraft(type)
+              void (async () => {
+                await window.api.updateIncomeEntry(entry.id, { income_type: type })
+                onChanged()
+                if (!type.trim()) return
+                setActiveField(null)
+              })()
+            }}
+            onKeyDown={handleKeyDown}
+            placeholder="-"
+            buttonClassName={typeDraft.trim() ? undefined : unsetTypeClassName}
+          />
+        ) : (
+          <button type="button" onClick={() => setActiveField('income_type')} className={typeChipPresentation.className} style={typeChipPresentation.style}>{resolvedType || '-'}</button>
+        )}
+
+        {activeField === 'amount' ? (
+          <input autoFocus value={amountDraft} onChange={(event) => setAmountDraft(event.target.value)} onKeyDown={handleKeyDown} className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-right text-sm tabular-nums text-zinc-900 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:ring-zinc-800" />
+        ) : (
+          <button type="button" onClick={() => setActiveField('amount')} className="flex h-7 min-w-0 items-center justify-end font-medium tabular-nums text-emerald-600">{formatCurrency(entry.amount)}</button>
+        )}
+
+        {editMode ? (
+          <div className="flex items-center justify-end gap-1">
+            <button type="button" onClick={() => setActiveField('shoot_name')} aria-label={`Edit ${entry.shoot_name || 'income entry'}`} className="inline-flex h-6 w-6 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200">
+              <PencilIcon />
+            </button>
+            <button type="button" onClick={() => void onDelete()} aria-label={`Delete ${entry.shoot_name || 'income entry'}`} className="inline-flex h-6 w-6 items-center justify-center rounded-full text-zinc-300 transition-colors hover:bg-red-50 hover:text-red-600 dark:text-zinc-600 dark:hover:bg-red-950/30 dark:hover:text-red-300">
+              <XIcon />
+            </button>
+          </div>
+        ) : (
+          <button type="button" onClick={toggleNotes} className="inline-flex h-6 w-6 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200" aria-label={notesOpen ? 'Hide notes' : 'Show notes'}>
+            <ChevronIcon direction={notesOpen ? 'up' : 'down'} />
+          </button>
+        )}
+      </div>
+      {notesOpen ? (
+        <IncomeNotesPanel
+          ref={notesPanelRef}
+          notes={activeField === 'notes' ? notesDraft : entry.notes}
+          editing={activeField === 'notes'}
+          onStartEdit={() => {
+            setNotesOpen(true)
+            setActiveField('notes')
+          }}
+          onCommit={(next) => {
+            setNotesDraft(next)
+            void (async () => {
+              if (savingRef.current) return
+              savingRef.current = true
+              try {
+                await window.api.updateIncomeEntry(entry.id, { notes: next })
+                onChanged()
+              } finally {
+                savingRef.current = false
+              }
+            })()
+          }}
+          onCollapse={() => {
+            setActiveField(null)
+            setNotesOpen(false)
+          }}
+        />
+      ) : null}
+    </div>
+  )
 }
 
-function incomeTone(type: IncomeTypeFilter): 'emerald' | 'amber' | 'sky' | 'violet' {
+function AddIncomeRow({ incomeTypes, onRegisterType, onUnregisterType, onRenameType, onDone }: { incomeTypes: string[]; onRegisterType: (type: string) => void; onUnregisterType: (type: string) => void; onRenameType: (from: string, to: string) => void; onDone: (created?: IncomeEntry) => void }) {
+  const [date, setDate] = useState(format(new Date(), 'M/d/yyyy'))
+  const [shootName, setShootName] = useState('')
+  const [company, setCompany] = useState('')
+  const [incomeType, setIncomeType] = useState('')
+  const [amount, setAmount] = useState('')
+  const typeInputRef = useRef<HTMLInputElement>(null)
+
+  async function create(): Promise<void> {
+    if (!shootName.trim() && !company.trim() && !amount.trim()) { onDone(); return }
+    const created = await window.api.createIncomeEntry({
+      date: parseIncomeDateInput(date, Math.floor(Date.now() / 1000)),
+      shoot_name: shootName.trim(),
+      company: company.trim(),
+      income_type: incomeType.trim(),
+      amount: parseCurrencyInput(amount),
+      notes: ''
+    })
+    onDone(created)
+  }
+
+  function handleEsc(): void {
+    onDone()
+  }
+
+  return (
+    <div className="grid grid-cols-[90px_minmax(0,1fr)_130px_minmax(150px,max-content)_100px_64px] items-center gap-2 border-b border-zinc-100 bg-zinc-50 px-4 py-3 text-sm dark:border-zinc-800 dark:bg-zinc-950">
+      <input value={date} onChange={(event) => setDate(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') handleEsc() }} className="min-w-0 bg-transparent tabular-nums text-zinc-600 outline-none dark:text-zinc-300" />
+      <input autoFocus value={shootName} onChange={(event) => setShootName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') handleEsc(); if (event.key === 'Enter') typeInputRef.current?.focus() }} placeholder="Shoot" className="min-w-0 bg-transparent text-zinc-900 outline-none placeholder:text-zinc-400 dark:text-zinc-100 dark:placeholder:text-zinc-500" />
+      <input value={company} onChange={(event) => setCompany(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') handleEsc() }} placeholder="Name" className="min-w-0 bg-transparent text-zinc-700 outline-none placeholder:text-zinc-400 dark:text-zinc-200 dark:placeholder:text-zinc-500" />
+      <IncomeTypeField
+        value={incomeType}
+        incomeTypes={incomeTypes}
+        onChange={setIncomeType}
+        onRegisterType={onRegisterType}
+        onUnregisterType={onUnregisterType}
+        onRenameType={onRenameType}
+        autoFocus={false}
+        inputRef={typeInputRef}
+        inputClassName="w-full min-w-0 bg-transparent outline-none placeholder:text-zinc-400 dark:placeholder:text-zinc-500"
+        placeholder="Type"
+      />
+      <input value={amount} onChange={(event) => setAmount(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void create(); if (event.key === 'Escape') handleEsc() }} placeholder="$0.00" className="min-w-0 bg-transparent text-right tabular-nums text-zinc-900 outline-none placeholder:text-zinc-400 dark:text-zinc-100 dark:placeholder:text-zinc-500" />
+      <button type="button" onClick={() => void create()} className="inline-flex h-6 w-6 items-center justify-center rounded-full text-emerald-600 transition-colors hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-950/30" aria-label="Confirm income"><CheckIcon /></button>
+    </div>
+  )
+}
+
+function IncomeCalendarDropdown({ period, anchor, onSelect }: { period: IncomeDisplayPeriod; anchor: Date; onSelect: (date: Date) => void }) {
+  if (period === 'year') return <IncomeYearPicker anchor={anchor} onSelect={onSelect} />
+  if (period === 'month') return <IncomeMonthPicker anchor={anchor} onSelect={onSelect} />
+  return <IncomeWeekPicker anchor={anchor} onSelect={onSelect} />
+}
+
+function IncomeYearPicker({ anchor, onSelect }: { anchor: Date; onSelect: (date: Date) => void }) {
+  const current = anchor.getFullYear()
+  const years = [current - 2, current - 1, current, current + 1, current + 2]
+  return (
+    <div className="absolute right-0 z-40 mt-1 rounded-lg border border-zinc-200/80 bg-white p-1 shadow-[0_4px_12px_rgba(0,0,0,0.12)] dark:border-zinc-600 dark:bg-zinc-900">
+      <div className="flex gap-1">
+        {years.map((year) => (
+          <button key={year} type="button" onClick={() => onSelect(new Date(year, 0, 1))} className={`rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors ${year === current ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950' : 'text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-950'}`}>
+            {year}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function IncomeMonthPicker({ anchor, onSelect }: { anchor: Date; onSelect: (date: Date) => void }) {
+  const [viewYear, setViewYear] = useState(anchor.getFullYear())
+  const selectedMonth = anchor.getMonth()
+  const selectedYear = anchor.getFullYear()
+  return (
+    <div className="absolute right-0 z-40 mt-1 w-[200px] rounded-lg border border-zinc-200/80 bg-white p-2 shadow-[0_4px_12px_rgba(0,0,0,0.12)] dark:border-zinc-600 dark:bg-zinc-900">
+      <div className="mb-2 flex items-center justify-between">
+        <button type="button" onClick={() => setViewYear((year) => year - 1)} className="px-1.5 py-0.5 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"><span className="inline-block -rotate-90"><SmallChevron /></span></button>
+        <span className="text-[12px] font-semibold text-zinc-800 dark:text-zinc-200">{viewYear}</span>
+        <button type="button" onClick={() => setViewYear((year) => year + 1)} className="px-1.5 py-0.5 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"><span className="inline-block rotate-90"><SmallChevron /></span></button>
+      </div>
+      <div className="grid grid-cols-3 gap-1">
+        {MONTH_LABELS.map((label, index) => {
+          const selected = viewYear === selectedYear && index === selectedMonth
+          return (
+            <button key={label} type="button" onClick={() => onSelect(new Date(viewYear, index, 1))} className={`rounded-md px-1 py-1.5 text-[11px] font-medium transition-colors ${selected ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950' : 'text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-950'}`}>
+              {label}
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function IncomeWeekPicker({ anchor, onSelect }: { anchor: Date; onSelect: (date: Date) => void }) {
+  const [viewMonth, setViewMonth] = useState(() => startOfMonth(anchor))
+  const selectedWeekStart = startOfWeek(anchor, { weekStartsOn: 1 })
+  const daysInMonth = getDaysInMonth(viewMonth)
+  const firstDayOfMonth = getDay(viewMonth)
+  const startOffset = (firstDayOfMonth + 6) % 7
+  const cells: Array<{ date: Date; inMonth: boolean }> = []
+
+  for (let index = 0; index < startOffset; index += 1) {
+    cells.push({ date: new Date(viewMonth.getFullYear(), viewMonth.getMonth(), 1 - startOffset + index), inMonth: false })
+  }
+  for (let day = 1; day <= daysInMonth; day += 1) {
+    cells.push({ date: new Date(viewMonth.getFullYear(), viewMonth.getMonth(), day), inMonth: true })
+  }
+  while (cells.length % 7 !== 0) {
+    const last = cells[cells.length - 1].date
+    cells.push({ date: new Date(last.getFullYear(), last.getMonth(), last.getDate() + 1), inMonth: false })
+  }
+  const weeks: Array<typeof cells> = []
+  for (let index = 0; index < cells.length; index += 7) weeks.push(cells.slice(index, index + 7))
+
+  return (
+    <div className="absolute right-0 z-40 mt-1 w-[240px] rounded-lg border border-zinc-200/80 bg-white p-2 shadow-[0_4px_12px_rgba(0,0,0,0.12)] dark:border-zinc-600 dark:bg-zinc-900">
+      <div className="mb-2 flex items-center justify-between">
+        <button type="button" onClick={() => setViewMonth((month) => addMonths(month, -1))} className="px-1.5 py-0.5 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"><span className="inline-block -rotate-90"><SmallChevron /></span></button>
+        <span className="text-[12px] font-semibold text-zinc-800 dark:text-zinc-200">{format(viewMonth, 'MMMM yyyy')}</span>
+        <button type="button" onClick={() => setViewMonth((month) => addMonths(month, 1))} className="px-1.5 py-0.5 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"><span className="inline-block rotate-90"><SmallChevron /></span></button>
+      </div>
+      <div className="mb-1 grid grid-cols-7 gap-0">
+        {WEEKDAY_LABELS.map((day) => <div key={day} className="py-0.5 text-center text-[9px] font-medium text-zinc-400 dark:text-zinc-500">{day}</div>)}
+      </div>
+      <div className="flex flex-col">
+        {weeks.map((week, weekIndex) => {
+          const weekStart = startOfWeek(week[0].date, { weekStartsOn: 1 })
+          const selected = weekStart.getTime() === selectedWeekStart.getTime()
+          return (
+            <button key={weekIndex} type="button" onClick={() => onSelect(weekStart)} className={`grid grid-cols-7 gap-0 rounded-md transition-colors ${selected ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950' : 'hover:bg-zinc-50 dark:hover:bg-zinc-950'}`}>
+              {week.map((cell, cellIndex) => (
+                <div key={cellIndex} className={`py-1 text-center text-[11px] ${selected ? '' : cell.inMonth ? 'text-zinc-700 dark:text-zinc-200' : 'text-zinc-300 dark:text-zinc-600'}`}>
+                  {cell.date.getDate()}
+                </div>
+              ))}
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function formatIncomeDateInput(unix: number): string {
+  return format(new Date(unix * 1000), 'M/d/yyyy')
+}
+
+function parseIncomeDateInput(value: string, fallback: number): number {
+  const localDate = parseLocalDateToUnix(value)
+  if (localDate !== null) return localDate
+  const parsed = Date.parse(value)
+  return Number.isNaN(parsed) ? fallback : Math.floor(parsed / 1000)
+}
+
+function loadCustomIncomeTypes(): string[] {
+  try {
+    const raw = localStorage.getItem(INCOME_CUSTOM_TYPES_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.map((value) => String(value).trim()).filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+function loadHiddenIncomeTypes(): Set<string> {
+  try {
+    const raw = localStorage.getItem(INCOME_HIDDEN_TYPES_KEY)
+    if (!raw) return new Set()
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return new Set()
+    return new Set(parsed.map((value) => String(value).trim()).filter(Boolean))
+  } catch {
+    return new Set()
+  }
+}
+
+function saveHiddenIncomeTypes(types: Set<string>): void {
+  localStorage.setItem(INCOME_HIDDEN_TYPES_KEY, JSON.stringify([...types]))
+}
+
+function buildIncomeTypeOptions(entries: IncomeEntry[], customTypes: string[], hiddenTypes: Set<string>): string[] {
+  const values = new Set<string>([...DEFAULT_INCOME_TYPES, ...customTypes])
+  for (const entry of entries) {
+    const resolved = resolveIncomeType(entry)
+    if (resolved) values.add(resolved)
+  }
+  return [...values].filter((type) => !hiddenTypes.has(type)).sort((a, b) => a.localeCompare(b))
+}
+
+function buildPeriodIncomeTypeOptions(entries: IncomeEntry[], hiddenTypes: Set<string>): string[] {
+  const values = new Set<string>()
+  for (const entry of entries) {
+    const resolved = resolveIncomeType(entry)
+    if (resolved && !hiddenTypes.has(resolved)) values.add(resolved)
+  }
+  return [...values].sort((a, b) => a.localeCompare(b))
+}
+
+function resolveIncomeType(entry: IncomeEntry): string {
+  return entry.income_type?.trim() ?? ''
+}
+
+function incomeFilteredTotalPresentation(types: string[]): { style: CSSProperties } {
+  const colors = types.map((type) => incomeTypeColor(type)).filter(Boolean)
+  if (colors.length === 0) return { style: { color: '#047857' } }
+  if (colors.length === 1) return { style: { color: colors[0] } }
+  const mixed = colors.reduce(
+    (sum, color) => {
+      const rgb = hexToRgb(color)
+      if (!rgb) return sum
+      return { red: sum.red + rgb.red, green: sum.green + rgb.green, blue: sum.blue + rgb.blue, count: sum.count + 1 }
+    },
+    { red: 0, green: 0, blue: 0, count: 0 }
+  )
+  if (mixed.count === 0) return { style: { color: '#047857' } }
+  return {
+    style: {
+      color: rgbToHex(
+        Math.round(mixed.red / mixed.count),
+        Math.round(mixed.green / mixed.count),
+        Math.round(mixed.blue / mixed.count)
+      )
+    }
+  }
+}
+
+function incomeTypeColor(type: string): string {
+  const custom = readIncomeTypeColorHex(type)
+  if (custom) return custom
+  const tone = incomeTone(type)
+  if (tone === 'emerald') return '#059669'
+  if (tone === 'amber') return '#d97706'
+  if (tone === 'sky') return '#0284c7'
+  return '#7c3aed'
+}
+
+function hexToRgb(hex: string): { red: number; green: number; blue: number } | null {
+  const normalized = hex.trim().replace(/^#/, '')
+  if (!/^[0-9a-fA-F]{6}$/.test(normalized)) return null
+  return {
+    red: Number.parseInt(normalized.slice(0, 2), 16),
+    green: Number.parseInt(normalized.slice(2, 4), 16),
+    blue: Number.parseInt(normalized.slice(4, 6), 16)
+  }
+}
+
+function rgbToHex(red: number, green: number, blue: number): string {
+  return `#${[red, green, blue].map((value) => value.toString(16).padStart(2, '0')).join('')}`
+}
+
+function incomeTone(type: string): 'emerald' | 'amber' | 'sky' | 'violet' {
   if (type === 'Snappr') return 'emerald'
   if (type === 'Thumbtack') return 'amber'
   if (type === 'Upwork') return 'sky'
   return 'violet'
 }
 
-function incomeBadgeClass(type: IncomeTypeFilter): string {
+function incomeBadgeClass(type: string): string {
   const tone = incomeTone(type)
   if (tone === 'emerald') return 'bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-950/30 dark:text-emerald-300 dark:ring-emerald-900'
   if (tone === 'amber') return 'bg-amber-50 text-amber-700 ring-amber-200 dark:bg-amber-950/30 dark:text-amber-300 dark:ring-amber-900'
@@ -777,54 +1717,6 @@ function QuickMetric({ label, value, accent = 'text-zinc-900 dark:text-zinc-100'
   )
 }
 
-function FilterGlyph({ label }: { label: string }) {
-  return (
-    <div className="group relative inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-zinc-100 text-zinc-500 dark:bg-zinc-800" aria-label={label}>
-      <FilterIcon />
-      <span className="pointer-events-none absolute left-1/2 top-[calc(100%+6px)] z-20 -translate-x-1/2 rounded-md bg-zinc-800 px-2 py-1 text-[10px] font-medium text-white opacity-0 shadow-sm transition-opacity duration-150 group-hover:opacity-100 dark:bg-zinc-100 dark:text-zinc-900">
-        {label}
-      </span>
-    </div>
-  )
-}
-
-function FilterPill({ label, active, tone, onClick }: { label: string; active: boolean; tone: 'emerald' | 'amber' | 'sky' | 'violet' | 'zinc'; onClick: () => void }) {
-  const activeClass =
-    tone === 'emerald'
-      ? 'bg-emerald-50 text-emerald-700 ring-emerald-200 shadow-[0_1px_2px_rgba(0,0,0,0.04)] dark:bg-emerald-950/30 dark:text-emerald-300 dark:ring-emerald-900'
-      : tone === 'amber'
-        ? 'bg-amber-50 text-amber-700 ring-amber-200 shadow-[0_1px_2px_rgba(0,0,0,0.04)] dark:bg-amber-950/30 dark:text-amber-300 dark:ring-amber-900'
-        : tone === 'sky'
-          ? 'bg-sky-50 text-sky-700 ring-sky-200 shadow-[0_1px_2px_rgba(0,0,0,0.04)] dark:bg-sky-950/30 dark:text-sky-300 dark:ring-sky-900'
-          : tone === 'violet'
-            ? 'bg-violet-50 text-violet-700 ring-violet-200 shadow-[0_1px_2px_rgba(0,0,0,0.04)] dark:bg-violet-950/30 dark:text-violet-300 dark:ring-violet-900'
-            : 'bg-zinc-900 text-white ring-zinc-900 shadow-[0_1px_2px_rgba(0,0,0,0.04)] dark:bg-zinc-100 dark:text-zinc-950 dark:ring-zinc-100'
-  return (
-    <button
-      type="button"
-      aria-pressed={active}
-      onClick={onClick}
-      className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium ring-1 ring-inset transition-all duration-150 ease-out focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-300 ${
-        active
-          ? activeClass
-          : 'bg-white text-zinc-500 ring-zinc-200 hover:bg-zinc-50 hover:text-zinc-700 dark:bg-zinc-900 dark:text-zinc-400 dark:ring-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200'
-      }`}
-    >
-      <span className={`h-1.5 w-1.5 rounded-full ${dotClass(tone, active)}`} />
-      {label}
-    </button>
-  )
-}
-
-function dotClass(tone: 'emerald' | 'amber' | 'sky' | 'violet' | 'zinc', active: boolean): string {
-  if (!active) return 'bg-zinc-300 dark:bg-zinc-600'
-  if (tone === 'emerald') return 'bg-emerald-500'
-  if (tone === 'amber') return 'bg-amber-500'
-  if (tone === 'sky') return 'bg-sky-500'
-  if (tone === 'violet') return 'bg-violet-500'
-  return 'bg-zinc-500'
-}
-
 function StatCard({ label, value, accent = 'text-zinc-900 dark:text-zinc-100' }: { label: string; value: string; accent?: string }) {
   return (
     <div className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
@@ -862,20 +1754,68 @@ function EditablePlain({ value, onSave, align = 'left', className = '', fallback
   return <button type="button" onDoubleClick={() => { setDraft(value); setEditing(true); }} className={`block w-full truncate ${align === 'right' ? 'text-right' : 'text-left'} ${className || 'text-zinc-800 dark:text-zinc-100'}`}>{value || fallback}</button>
 }
 
-function FilterIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
-      <path d="M4 6h12" />
-      <path d="M6.5 10h7" />
-      <path d="M9 14h2" />
-    </svg>
-  )
-}
-
 function ChevronIcon({ direction }: { direction: 'up' | 'down' }) {
   return (
     <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       {direction === 'up' ? <path d="m5 12 5-5 5 5" /> : <path d="m5 8 5 5 5-5" />}
+    </svg>
+  )
+}
+
+function CalendarIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="2" y="3" width="12" height="11" rx="2" />
+      <path d="M2 7h12M5 1v3M11 1v3" />
+    </svg>
+  )
+}
+
+function SmallChevron() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M5 12.5 L10 7.5 L15 12.5" />
+    </svg>
+  )
+}
+
+function PencilIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M9.8 3.1 12.9 6.2M2.8 10.1 10.7 2.2a1.5 1.5 0 0 1 2.1 0l1 1a1.5 1.5 0 0 1 0 2.1L5.9 13.2l-3.6.6.5-3.7Z" />
+    </svg>
+  )
+}
+
+function CheckIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="m3 7.3 2.6 2.6L11 4.1" />
+    </svg>
+  )
+}
+
+function UndoIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M3 7h7a3 3 0 0 1 0 6H8" />
+      <path d="M5 5 3 7l2 2" />
+    </svg>
+  )
+}
+
+function PlusIcon() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
+      <path d="M6 1v10M1 6h10" />
+    </svg>
+  )
+}
+
+function XIcon() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
+      <path d="m3 3 6 6M9 3 3 9" />
     </svg>
   )
 }

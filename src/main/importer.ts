@@ -3,6 +3,7 @@ import { readFileSync, statSync } from 'fs'
 import Papa from 'papaparse'
 import * as XLSX from 'xlsx'
 import type { ImportedFilePreview, ImportResult, Transaction } from '../types/money'
+import { parseLocalDateToUnix } from '../types/dateParsing'
 import {
   applyRulesToCategory,
   createTransaction,
@@ -26,13 +27,13 @@ function detectAccountId(filePath: string): number | null {
     return getOrCreateAccountByName('Venmo', 'venmo').id
   }
   if (fileName.includes('transaction_download') || isCapitalOneStatement(content)) {
-    return getOrCreateAccountByName('Capital One', 'credit').id
+    return getOrCreateAccountByName('Capital One', 'capital_one').id
   }
   if (fileName.includes('chase')) {
-    return getOrCreateAccountByName('Chase', 'checking').id
+    return getOrCreateAccountByName('Chase', 'chase').id
   }
   if (fileName.includes('ebt')) {
-    return getOrCreateAccountByName('EBT', 'checking').id
+    return getOrCreateAccountByName('EBT', 'ebt').id
   }
   return null
 }
@@ -169,6 +170,8 @@ function pick(row: RawRow, keys: string[]): string {
 function parseDate(value: string): number {
   const trimmed = value.trim()
   if (!trimmed) return 0
+  const localDate = parseLocalDateToUnix(trimmed)
+  if (localDate !== null) return localDate
   const parsed = Date.parse(trimmed)
   if (!Number.isNaN(parsed)) return Math.floor(parsed / 1000)
 

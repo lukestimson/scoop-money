@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type DragEvent, type FormEvent, type Ref } from 'react'
 import { flushSync } from 'react-dom'
-import type { ChatAttachment, ChatMessage, ModelInfo, PageId } from '../../../types/money'
+import type { AiProvider, ChatAttachment, ChatMessage, ModelInfo, PageId } from '../../../types/money'
 import { useAppContext } from '../context/AppContext'
 import { chatMessagesToTurns, newChatMessageId, useChat } from '../context/ChatContext'
 
@@ -16,6 +16,10 @@ const COLLAPSE_DRAG_THRESHOLD_PX = 168
 const MIN_HEIGHT_WITH_HISTORY_PX = 280
 const PEEK_OPEN_HEIGHT_PX = 216
 const MAX_PANEL_FRACTION = 0.58
+/** Form pt-3 + pb-2 + toolbar mt-2 (space reserved below textarea). */
+const COMPOSER_FORM_VERTICAL_PADDING_PX = 28
+/** mb-2 under attachment chips is not included in offsetHeight. */
+const ATTACHMENT_STRIP_MARGIN_BOTTOM_PX = 8
 
 function totalMessageChars(messages: ChatMessage[]): number {
   return messages.reduce((sum, message) => sum + message.content.length, 0)
@@ -48,6 +52,7 @@ export function ChatBox({
   const [isDragging, setIsDragging] = useState(false)
   const [dictationArmed, setDictationArmed] = useState(false)
   const [voiceError, setVoiceError] = useState<string | null>(null)
+  const [provider, setProvider] = useState<AiProvider>('anthropic')
   const [modelId, setModelId] = useState('')
   const [models, setModels] = useState<ModelInfo[]>([])
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
@@ -60,6 +65,9 @@ export function ChatBox({
   const modelMenuRef = useRef<HTMLDivElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const threadColumnRef = useRef<HTMLDivElement | null>(null)
+  const composerToolbarRef = useRef<HTMLDivElement | null>(null)
+  const attachmentBoxRef = useRef<HTMLDivElement | null>(null)
   const scrollRaf = useRef<number | null>(null)
   const prevMessageLength = useRef(0)
   const lastRawHeightRef = useRef(0)
@@ -87,11 +95,12 @@ export function ChatBox({
 
   useEffect(() => {
     let cancelled = false
-    Promise.all([window.api.getModel(), window.api.getAvailableModels()])
-      .then(([id, list]) => {
+    window.api.getAiProvider()
+      .then((state) => {
         if (cancelled) return
-        setModelId(id)
-        setModels(list)
+        setProvider(state.provider)
+        setModelId(state.model)
+        setModels(state.models)
       })
       .catch(() => undefined)
     return () => {
@@ -172,6 +181,44 @@ export function ChatBox({
     }
   }, [pageId, resizing, setHeight])
 
+  const syncComposerTextareaHeight = useCallback((): void => {
+    const column = threadColumnRef.current
+    const textarea = textareaRef.current
+    const toolbar = composerToolbarRef.current
+    if (!column || !textarea || !isExpanded) return
+
+    const columnHeight = column.clientHeight
+    const toolbarHeight = toolbar?.offsetHeight ?? 44
+    const attachmentHeight = attachmentBoxRef.current?.offsetHeight ?? 0
+    const attachmentMargin = attachments.length > 0 ? ATTACHMENT_STRIP_MARGIN_BOTTOM_PX : 0
+    const maxTextarea = Math.max(
+      44,
+      columnHeight - toolbarHeight - attachmentHeight - attachmentMargin - COMPOSER_FORM_VERTICAL_PADDING_PX
+    )
+
+    textarea.style.height = 'auto'
+    const scrollWant = textarea.scrollHeight
+    const next = Math.min(scrollWant, maxTextarea)
+    textarea.style.height = `${next}px`
+    textarea.style.overflowY = scrollWant > maxTextarea ? 'auto' : 'hidden'
+  }, [attachments.length, isExpanded])
+
+  useLayoutEffect(() => {
+    syncComposerTextareaHeight()
+  }, [chat.draft, chat.height, isExpanded, attachments.length, syncComposerTextareaHeight])
+
+  useEffect(() => {
+    const column = threadColumnRef.current
+    if (!column || !isExpanded) return
+    const observer = new ResizeObserver(() => {
+      syncComposerTextareaHeight()
+    })
+    observer.observe(column)
+    return () => {
+      observer.disconnect()
+    }
+  }, [isExpanded, syncComposerTextareaHeight])
+
   const openExpandedSmart = useCallback((): void => {
     const windowHeight = typeof window !== 'undefined' ? window.innerHeight : 800
     flushSync(() => setIsExpanded(true))
@@ -246,6 +293,18 @@ export function ChatBox({
       setVoiceError(error instanceof Error ? error.message : String(error))
     }
   }, [])
+
+  const toggleModelMenu = useCallback((): void => {
+    setModelMenuOpen((open) => {
+      const next = !open
+      if (next) {
+        const windowHeight = typeof window !== 'undefined' ? window.innerHeight : 800
+        const pickerHeight = Math.min(Math.round(windowHeight * MAX_PANEL_FRACTION), 420)
+        setHeight(pageId, Math.max(chat.height, pickerHeight))
+      }
+      return next
+    })
+  }, [chat.height, pageId, setHeight])
 
   const handleSelectModel = useCallback(
     async (id: string): Promise<void> => {
@@ -333,15 +392,6 @@ export function ChatBox({
     })
   }
 
-  useLayoutEffect(() => {
-    const element = textareaRef.current
-    if (!element) return
-    element.style.height = 'auto'
-    const max = window.innerHeight * 0.5
-    element.style.height = `${Math.min(element.scrollHeight, max)}px`
-    element.style.overflowY = element.scrollHeight > max ? 'auto' : 'hidden'
-  }, [chat.draft, pageId])
-
   const onDragOver = (event: DragEvent<HTMLFormElement>): void => {
     if (event.dataTransfer.types.includes('Files')) {
       event.preventDefault()
@@ -362,8 +412,9 @@ export function ChatBox({
 
   const canSend = !isSending && (chat.draft.trim().length > 0 || attachments.length > 0)
   const modelLabel = models.find((model) => model.id === modelId)?.display_name ?? formatModelLabel(modelId)
+  const providerLabel = provider === 'anthropic' ? 'Anthropic' : 'OpenAI'
   const formShellExpanded = [
-    'relative shrink-0 border-t border-zinc-100 bg-white px-3 pb-2 pt-3 transition-colors dark:border-zinc-800 dark:bg-zinc-900',
+    'relative z-10 flex max-h-full min-h-0 shrink-0 flex-col overflow-visible border-t border-zinc-100 bg-white px-3 pb-2 pt-3 transition-colors dark:border-zinc-800 dark:bg-zinc-900',
     isDragging ? 'ring-2 ring-inset ring-zinc-300 dark:ring-zinc-600' : 'focus-within:ring-2 focus-within:ring-inset focus-within:ring-zinc-200 dark:focus-within:ring-zinc-700'
   ].join(' ')
 
@@ -375,8 +426,8 @@ export function ChatBox({
         </div>
       ) : null}
 
-      {attachments.length > 0 ? (
-        <div className="mb-2 flex flex-wrap gap-1.5">
+      <div className="flex min-w-0 shrink-0 flex-col overflow-hidden">
+        <div ref={attachmentBoxRef} className={attachments.length > 0 ? 'mb-2 shrink-0 flex flex-wrap gap-1.5' : 'shrink-0'}>
           {attachments.map((attachment) => (
             <AttachmentChip
               key={attachment.id}
@@ -385,28 +436,36 @@ export function ChatBox({
             />
           ))}
         </div>
-      ) : null}
 
-      <textarea
-        ref={textareaRef}
-        value={chat.draft}
-        onChange={(event) => setDraft(pageId, event.target.value)}
-        onFocus={() => {
-          if (!isExpanded) openExpandedSmart()
-          else if (chat.messages.length > 0 && chat.height < MIN_HEIGHT_WITH_HISTORY_PX) setHeight(pageId, MIN_HEIGHT_WITH_HISTORY_PX)
-        }}
-        onKeyDown={(event) => {
-          if (event.key === 'Enter' && !event.shiftKey) {
-            event.preventDefault()
-            void handleSubmit()
-          }
-        }}
-        placeholder="Reply..."
-        rows={1}
-        className="block min-h-[44px] w-full resize-none bg-transparent px-2 py-2 text-[15px] leading-relaxed text-zinc-900 placeholder:text-zinc-400 focus:outline-none dark:text-zinc-100 dark:placeholder:text-zinc-500"
-      />
+        <textarea
+          ref={textareaRef}
+          value={chat.draft}
+          onChange={(event) => setDraft(pageId, event.target.value)}
+          onFocus={() => {
+            if (!isExpanded) openExpandedSmart()
+            else if (chat.messages.length > 0 && chat.height < MIN_HEIGHT_WITH_HISTORY_PX) setHeight(pageId, MIN_HEIGHT_WITH_HISTORY_PX)
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') {
+              event.preventDefault()
+              event.stopPropagation()
+              setAttachOpen(false)
+              setModelMenuOpen(false)
+              setIsExpanded(false)
+              return
+            }
+            if (event.key === 'Enter' && !event.shiftKey) {
+              event.preventDefault()
+              void handleSubmit()
+            }
+          }}
+          placeholder="Reply..."
+          rows={1}
+          className="block min-h-[44px] min-w-0 w-full shrink-0 resize-none overflow-y-hidden overscroll-contain bg-transparent px-2 py-2 text-[15px] leading-relaxed text-zinc-900 placeholder:text-zinc-400 focus:outline-none dark:text-zinc-100 dark:placeholder:text-zinc-500"
+        />
+      </div>
 
-      <div className="mt-2 flex items-center justify-between gap-2 px-1">
+      <div ref={composerToolbarRef} className="mt-2 flex shrink-0 items-center justify-between gap-2 px-1">
         <div className="relative">
           <button
             ref={attachBtnRef}
@@ -457,10 +516,10 @@ export function ChatBox({
             <button
               ref={modelBtnRef}
               type="button"
-              onClick={() => setModelMenuOpen((value) => !value)}
+              onClick={toggleModelMenu}
               aria-haspopup="listbox"
               aria-expanded={modelMenuOpen}
-              title={modelId ? `Anthropic model: ${modelId}` : 'Loading model...'}
+              title={modelId ? `${providerLabel} model: ${modelId}` : 'Loading model...'}
               className={`inline-flex max-w-[min(17rem,46vw)] shrink-0 items-center gap-1 truncate rounded-full px-2 py-1 text-[12px] font-medium transition-colors ${
                 modelMenuOpen ? 'bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100' : 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800 dark:hover:bg-zinc-800 dark:hover:text-zinc-200'
               }`}
@@ -469,7 +528,7 @@ export function ChatBox({
               <ChevronDownIcon />
             </button>
             {modelMenuOpen ? (
-              <ModelMenu innerRef={modelMenuRef} models={models} activeId={modelId} onSelect={handleSelectModel} />
+              <ModelMenu innerRef={modelMenuRef} models={models} activeId={modelId} providerLabel={providerLabel} onSelect={handleSelectModel} />
             ) : null}
           </div>
 
@@ -512,7 +571,7 @@ export function ChatBox({
               role="separator"
               aria-orientation="horizontal"
               aria-label="Resize chat panel"
-              className="relative flex shrink-0 cursor-ns-resize items-center border-b border-zinc-100 px-4 py-2 dark:border-zinc-800"
+              className="relative flex shrink-0 cursor-ns-resize select-none items-center border-b border-zinc-100 px-4 py-2 dark:border-zinc-800"
               onMouseDown={(event) => {
                 if ((event.target as HTMLElement).closest('button')) return
                 event.preventDefault()
@@ -530,30 +589,33 @@ export function ChatBox({
               >
                 <PanelChevronDownIcon />
               </button>
-              {chat.messages.length > 0 ? (
-                <button
-                  type="button"
-                  onMouseDown={(event) => event.stopPropagation()}
-                  onClick={() => {
-                    setMessages(pageId, [])
-                    setIsExpanded(false)
-                  }}
-                  className="ml-auto text-[11px] font-medium text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200"
-                >
-                  Clear
-                </button>
-              ) : null}
+              <button
+                type="button"
+                onMouseDown={(event) => event.stopPropagation()}
+                onClick={() => {
+                  setMessages(pageId, [])
+                  setIsExpanded(false)
+                }}
+                className="ml-auto text-[11px] font-medium text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200"
+              >
+                Clear
+              </button>
             </div>
-            <div ref={scrollRef} onScroll={onScrollLog} className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3" role="log" aria-live="polite">
-              {chat.messages.length === 0 && !isSending ? (
-                <p className="py-4 text-center text-sm text-zinc-400 dark:text-zinc-500">
-                  Ask about spending, budgets, income, or imported transactions.
-                </p>
-              ) : null}
-              {chat.messages.map((message) => (
-                <MessageBubble key={message.id} message={message} />
-              ))}
-              {isSending ? <LoadingBubble /> : null}
+            <div ref={threadColumnRef} className="flex min-h-0 flex-1 flex-col overflow-hidden">
+              <div ref={scrollRef} onScroll={onScrollLog} className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3" role="log" aria-live="polite">
+                {chat.messages.length === 0 && !isSending ? (
+                  <p className="py-4 text-center text-sm text-zinc-400 dark:text-zinc-500">
+                    Ask about spending, budgets, income, or imported transactions.
+                  </p>
+                ) : null}
+                {chat.messages.map((message) => (
+                  <MessageBubble key={message.id} message={message} />
+                ))}
+                {isSending ? <LoadingBubble /> : null}
+              </div>
+              <form onSubmit={handleSubmit} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop} className={formShellExpanded}>
+                {composer}
+              </form>
             </div>
           </>
         ) : (
@@ -585,12 +647,6 @@ export function ChatBox({
             ) : null}
           </div>
         )}
-
-        {isExpanded ? (
-          <form onSubmit={handleSubmit} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop} className={formShellExpanded}>
-            {composer}
-          </form>
-        ) : null}
       </div>
     </div>
   )
@@ -627,9 +683,12 @@ function LoadingBubble() {
   )
 }
 
-function ModelMenu({ innerRef, models, activeId, onSelect }: { innerRef: Ref<HTMLDivElement>; models: ModelInfo[]; activeId: string; onSelect: (id: string) => void }) {
+function ModelMenu({ innerRef, models, activeId, providerLabel, onSelect }: { innerRef: Ref<HTMLDivElement>; models: ModelInfo[]; activeId: string; providerLabel: string; onSelect: (id: string) => void }) {
   return (
-    <div ref={innerRef} role="listbox" aria-label="Select model" className="absolute bottom-[calc(100%+8px)] right-0 z-20 flex max-h-[min(320px,55vh)] w-[min(26rem,calc(100vw-1.25rem))] min-w-[18rem] flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-lg dark:border-zinc-600 dark:bg-zinc-900">
+    <div ref={innerRef} role="listbox" aria-label={`Select ${providerLabel} model`} className="absolute bottom-[calc(100%+8px)] right-0 z-50 flex max-h-[min(300px,48vh)] w-max min-w-[12rem] max-w-[18rem] flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-lg dark:border-zinc-600 dark:bg-zinc-900">
+      <div className="border-b border-zinc-100 px-2.5 py-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
+        {providerLabel} models
+      </div>
       <div className="flex-1 overflow-y-auto py-1">
         {models.length === 0 ? <div className="px-2.5 py-1.5 text-[11px] text-zinc-400">No models loaded</div> : null}
         {models.map((model) => {
@@ -637,9 +696,9 @@ function ModelMenu({ innerRef, models, activeId, onSelect }: { innerRef: Ref<HTM
           return (
             <button key={model.id} type="button" role="option" aria-selected={active} onClick={() => onSelect(model.id)} title={`${model.display_name || formatModelLabel(model.id)}\n${model.id}`} className={`flex w-full items-start gap-2 px-2.5 py-2 text-left transition-colors ${active ? 'bg-zinc-50 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100' : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'}`}>
               <span className="flex h-4 w-3 shrink-0 justify-center pt-0.5">{active ? <CheckIcon /> : null}</span>
-              <span className="min-w-0 flex-1">
+              <span className="min-w-0 flex-1 whitespace-nowrap">
                 <span className="block text-[12px] font-medium leading-snug text-zinc-900 dark:text-zinc-100">{model.display_name || formatModelLabel(model.id)}</span>
-                <span className="mt-0.5 block break-all font-mono text-[10px] leading-snug text-zinc-500 dark:text-zinc-400">{model.id}</span>
+                <span className="mt-0.5 block font-mono text-[10px] leading-snug text-zinc-500 dark:text-zinc-400">{model.id}</span>
               </span>
             </button>
           )
