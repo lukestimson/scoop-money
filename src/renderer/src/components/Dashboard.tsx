@@ -1,209 +1,191 @@
-import { useEffect, useMemo, useState } from 'react'
-import {
-  Area,
-  CartesianGrid,
-  ComposedChart,
-  Line,
-  ResponsiveContainer,
-  Scatter,
-  Tooltip,
-  XAxis,
-  YAxis
-} from 'recharts'
-import type { TooltipContentProps } from 'recharts'
-import type { BudgetItem, IncomeEntry, Transaction } from '../../../types/money'
-import { useAppContext } from '../context/AppContext'
-import { useChat } from '../context/ChatContext'
-import { formatCurrency } from '../lib/currency'
-import { groupTransactionsByPeriod, monthBounds, type PeriodUnit } from '../lib/dates'
-import { getBudgetAmount, getStoredBudgetType } from '../lib/budget'
-import { ChatBox } from './ChatBox'
+import { useState, useRef, useEffect, useMemo, ReactNode } from 'react'
+import { DisplayPeriod, getDisplayPeriodBounds, stepDisplayAnchor, formatDisplayAnchor } from '../lib/dates'
+import { IncomeEntry } from '../../../types/money'
 
-const UNIT_KEY = 'scoop_money_chart_unit'
+function SegmentedButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
+  return (
+    <button type="button" onClick={onClick} className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${active ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-zinc-100' : 'text-zinc-500 dark:text-zinc-400'}`}>
+      {children}
+    </button>
+  )
+}
 
-type ChartPoint = {
-  label: string
-  spent: number
-  budget: number
-  overFill: number
-  underFill: number
-  amount: number
+function ChevronIcon({ direction }: { direction: 'up' | 'down' }) {
+  return (
+    <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      {direction === 'up' ? <path d="m5 12 5-5 5 5" /> : <path d="m5 8 5 5 5-5" />}
+    </svg>
+  )
+}
+
+function formatCurrencyNoCents(cents: number): string {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: 0
+  }).format(cents / 100)
+}
+
+function IncomeSourcesWidget({ entries }: { entries: IncomeEntry[] }) {
+  const sourceTotals = useMemo(() => {
+    const totals = new Map<string, number>()
+    for (const entry of entries) {
+      const t = entry.type || entry.income_kind || 'Unknown'
+      totals.set(t, (totals.get(t) || 0) + entry.amount)
+    }
+    return Array.from(totals.entries()).sort((a, b) => a[1] - b[1]) // Ascending to match typical "growth" visuals, or just sort stable
+  }, [entries])
+
+  const maxTotal = Math.max(...sourceTotals.map(([, total]) => total), 1)
+
+  const colors = [
+    'bg-white',
+    'bg-[#f43f5e]', // rose-500 equivalent
+    'bg-white',
+    'bg-[#34d399]' // emerald-400 equivalent
+  ]
+
+  return (
+    <div className="flex h-full w-full flex-col rounded-[20px] bg-[#1c1c1e] p-6 shadow-sm">
+      <h2 className="mb-6 text-lg font-semibold tracking-tight text-white">Income Source</h2>
+      <div className="flex h-full min-h-[140px] flex-1 items-end justify-between gap-4 overflow-x-auto pb-2">
+        {sourceTotals.length === 0 ? (
+          <div className="flex h-full w-full items-center justify-center text-sm text-zinc-500">No income this period</div>
+        ) : (
+          sourceTotals.map(([source, total], idx) => {
+            const heightPercent = Math.max((total / maxTotal) * 100, 8)
+            return (
+              <div key={source} className="flex flex-col items-center justify-end gap-2 shrink-0 flex-1">
+                <div className="text-sm font-bold text-white">{formatCurrencyNoCents(total)}</div>
+                <div 
+                  className={`w-full max-w-[40px] rounded-sm ${colors[idx % colors.length]}`} 
+                  style={{ height: `${heightPercent}%`, minHeight: '6px' }} 
+                />
+                <div className="mt-1 text-[11px] font-medium text-white text-center leading-tight">{source}</div>
+              </div>
+            )
+          })
+        )}
+      </div>
+    </div>
+  )
+}
+
+const WIDGET_TYPES = [
+  { id: 'net-worth', label: 'Net Worth', color: 'bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-400' },
+  { id: 'spending-pie', label: 'Spending Breakdown', color: 'bg-amber-50 dark:bg-amber-950/30 text-amber-700 dark:text-amber-400' },
+  { id: 'recent-tx', label: 'Recent Transactions', color: 'bg-sky-50 dark:bg-sky-950/30 text-sky-700 dark:text-sky-400' },
+  { id: 'budget-progress', label: 'Budget Progress', color: 'bg-violet-50 dark:bg-violet-950/30 text-violet-700 dark:text-violet-400' },
+  { id: 'income-sources', label: 'Income Sources', color: 'bg-transparent border-none p-0' }, // Override for custom widget
+  { id: 'savings-rate', label: 'Savings Rate', color: 'bg-zinc-50 dark:bg-zinc-900 text-zinc-700 dark:text-zinc-400' }
+]
+
+const LAYOUT_KEY = 'scoop_dashboard_layout'
+const DASHBOARD_PERIOD_KEY = 'scoop_dashboard_period'
+
+function getInitialLayout() {
+  try {
+    const saved = localStorage.getItem(LAYOUT_KEY)
+    if (saved) {
+      const parsed = JSON.parse(saved)
+      if (Array.isArray(parsed) && parsed.length === WIDGET_TYPES.length) {
+        return parsed
+      }
+    }
+  } catch { /* ignore */ }
+  return WIDGET_TYPES.map(w => w.id)
 }
 
 export function Dashboard() {
-  const { dataVersion } = useAppContext()
-  const { getChat } = useChat()
-  const [transactions, setTransactions] = useState<Transaction[]>([])
-  const [budgetItems, setBudgetItems] = useState<BudgetItem[]>([])
-  const [income, setIncome] = useState<IncomeEntry[]>([])
-  const [chatExpanded, setChatExpanded] = useState(false)
-  const [unit, setUnit] = useState<PeriodUnit>(() => {
-    const stored = localStorage.getItem(UNIT_KEY)
-    return stored === 'week' || stored === 'month' ? stored : 'day'
+  const [layout, setLayout] = useState<string[]>(getInitialLayout)
+  const dragItemRef = useRef<number | null>(null)
+  const dragOverItemRef = useRef<number | null>(null)
+  
+  const [period, setPeriod] = useState<DisplayPeriod>(() => {
+    const p = localStorage.getItem(DASHBOARD_PERIOD_KEY)
+    return (p === 'week' || p === 'month' || p === 'year') ? p : 'month'
   })
+  const [anchor, setAnchor] = useState(() => new Date())
+  const [entries, setEntries] = useState<IncomeEntry[]>([])
 
   useEffect(() => {
-    Promise.all([
-      window.api.getTransactions(),
-      window.api.getBudgetItems(getStoredBudgetType()),
-      window.api.getIncomeEntries()
-    ]).then(([nextTransactions, nextBudget, nextIncome]) => {
-      setTransactions(nextTransactions)
-      setBudgetItems(nextBudget)
-      setIncome(nextIncome)
-    })
-  }, [dataVersion])
+    window.api.getIncomeEntries().then(setEntries)
+  }, [])
 
   useEffect(() => {
-    localStorage.setItem(UNIT_KEY, unit)
-  }, [unit])
+    localStorage.setItem(DASHBOARD_PERIOD_KEY, period)
+  }, [period])
 
-  const { start, end } = monthBounds()
-  const monthSpent = transactions
-    .filter((tx) => tx.amount !== 0 && tx.date >= start && tx.date <= end)
-    .reduce((sum, tx) => sum - tx.amount, 0)
-  const monthIncome = income
-    .filter((entry) => entry.date >= start && entry.date <= end)
-    .reduce((sum, entry) => sum + entry.amount, 0)
-  const monthlyBudget = budgetItems.reduce((sum, item) => sum + getBudgetAmount(item, getStoredBudgetType()), 0)
+  const { start, end } = getDisplayPeriodBounds(anchor, period)
+  const periodEntries = useMemo(() => entries.filter(e => e.date >= start && e.date <= end), [entries, start, end])
 
-  const chartData = useMemo<ChartPoint[]>(() => {
-    const grouped = groupTransactionsByPeriod(transactions, unit)
-    const budgetLevel = getPeriodBudget(monthlyBudget, unit)
-    const budget = budgetLevel / 100
-    if (grouped.length === 0) {
-      return [{ label: 'No data', spent: 0, budget, overFill: budget, underFill: budget, amount: 0 }]
-    }
-    return grouped.map((group) => {
-      const spent = group.amount / 100
-      return {
-        label: group.label,
-        spent,
-        budget,
-        overFill: Math.max(spent, budget),
-        underFill: Math.min(spent, budget),
-        amount: group.amount
-      }
-    })
-  }, [monthlyBudget, transactions, unit])
-  const chat = getChat('dashboard')
-  const fadeHeight = chatExpanded ? Math.min(chat.height + 128, 680) : 96
+  const handleSort = () => {
+    if (dragItemRef.current === null || dragOverItemRef.current === null) return
+    const _layout = [...layout]
+    const draggedItem = _layout[dragItemRef.current]
+    _layout.splice(dragItemRef.current, 1)
+    _layout.splice(dragOverItemRef.current, 0, draggedItem)
+    setLayout(_layout)
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify(_layout))
+    dragItemRef.current = null
+    dragOverItemRef.current = null
+  }
 
   return (
-    <div className="relative h-full overflow-hidden bg-white dark:bg-zinc-950">
-      <div className="h-full overflow-y-auto px-8 py-8 pb-28">
+    <div className="h-full overflow-y-auto px-8 py-8 bg-white dark:bg-zinc-950">
+      <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">Dashboard</h1>
-          <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">Spending, budget, income, and net for the current month.</p>
+          <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">Modular financial overview. Drag to reorder widgets.</p>
         </div>
-
-        <div className="mt-5 grid grid-cols-4 gap-3">
-          <StatCard label="This month spent" value={formatCurrency(monthSpent)} />
-          <StatCard label="This month budget" value={formatCurrency(monthlyBudget)} />
-          <StatCard label="This month income" value={formatCurrency(monthIncome)} accent="text-emerald-600" />
-          <StatCard label="Net" value={formatCurrency(monthIncome - monthSpent)} accent={monthIncome - monthSpent >= 0 ? 'text-emerald-600' : 'text-red-600'} />
-        </div>
-
-        <section className="mt-5 rounded-xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
-          <div className="mb-4 flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Spending over time</h2>
-            <div className="flex rounded-full bg-zinc-100 p-1 text-[12px] dark:bg-zinc-800">
-              {(['day', 'week', 'month'] as PeriodUnit[]).map((next) => (
-                <button
-                  key={next}
-                  type="button"
-                  onClick={() => setUnit(next)}
-                  className={`rounded-full px-3 py-1 capitalize transition-colors ${
-                    unit === next
-                      ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-zinc-100'
-                      : 'text-zinc-500 dark:text-zinc-400'
-                  }`}
-                >
-                  {next}
-                </button>
-              ))}
+        
+        <div className="flex flex-col items-end gap-2">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center rounded-full border border-zinc-200 bg-white text-sm shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
+              <button type="button" onClick={() => setAnchor((value) => stepDisplayAnchor(value, period, -1))} className="px-3 py-1.5 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100" aria-label="Previous">
+                <span className="inline-block -rotate-90"><ChevronIcon direction="up" /></span>
+              </button>
+              <div className="min-w-[120px] text-center text-[12px] font-medium text-zinc-700 dark:text-zinc-200">{formatDisplayAnchor(anchor, period)}</div>
+              <button type="button" onClick={() => setAnchor((value) => stepDisplayAnchor(value, period, 1))} className="px-3 py-1.5 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100" aria-label="Next">
+                <span className="inline-block rotate-90"><ChevronIcon direction="up" /></span>
+              </button>
+            </div>
+            <div className="inline-flex rounded-full bg-zinc-100 p-0.5 dark:bg-zinc-800" role="group" aria-label="Dashboard period">
+              <SegmentedButton active={period === 'week'} onClick={() => setPeriod('week')}>Week</SegmentedButton>
+              <SegmentedButton active={period === 'month'} onClick={() => setPeriod('month')}>Month</SegmentedButton>
+              <SegmentedButton active={period === 'year'} onClick={() => setPeriod('year')}>Year</SegmentedButton>
             </div>
           </div>
-          <div className="h-[320px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={chartData} margin={{ left: 12, right: 20, top: 10, bottom: 0 }}>
-                <defs>
-                  <pattern id="dashboard-over-budget" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-                    <line x1="0" y1="0" x2="0" y2="8" stroke="#ef4444" strokeWidth="2" opacity="0.45" />
-                  </pattern>
-                  <pattern id="dashboard-under-budget" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-                    <line x1="0" y1="0" x2="0" y2="8" stroke="#16a34a" strokeWidth="2" opacity="0.42" />
-                  </pattern>
-                </defs>
-                <CartesianGrid stroke="#e4e4e7" vertical={false} />
-                <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#71717a' }} />
-                <YAxis tickFormatter={(value) => `$${value}`} tick={{ fontSize: 11, fill: '#71717a' }} />
-                <Tooltip content={(props) => <ChartTooltip {...props} />} cursor={{ stroke: '#a1a1aa', strokeDasharray: '3 3' }} />
-                <Area type="monotone" dataKey="overFill" baseLine={chartData[0]?.budget ?? 0} stroke="none" fill="url(#dashboard-over-budget)" dot={false} activeDot={false} isAnimationActive={false} />
-                <Area type="monotone" dataKey="underFill" baseLine={chartData[0]?.budget ?? 0} stroke="none" fill="url(#dashboard-under-budget)" dot={false} activeDot={false} isAnimationActive={false} />
-                <Line type="monotone" dataKey="budget" name="Budget" stroke="#3b82f6" strokeWidth={2} dot={false} />
-                <Line type="monotone" dataKey="spent" name="Spent" stroke="#eab308" strokeWidth={2} dot={false} />
-                <Scatter dataKey="spent" name="Spent" fill="#eab308" />
-              </ComposedChart>
-            </ResponsiveContainer>
-          </div>
-        </section>
-      </div>
-      <div className="pointer-events-none absolute inset-x-8 bottom-4 z-20">
-        <div
-          aria-hidden="true"
-          style={{ height: fadeHeight }}
-          className="absolute inset-x-0 bottom-0 -z-10 bg-gradient-to-t from-white via-white/95 to-transparent transition-[height] duration-200 dark:from-zinc-950 dark:via-zinc-950/95"
-        />
-        <div className="pointer-events-auto">
-          <ChatBox pageId="dashboard" fullWidth onExpandedChange={setChatExpanded} />
         </div>
+      </div>
+      
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+        {layout.map((id, index) => {
+          const widget = WIDGET_TYPES.find(w => w.id === id)
+          if (!widget) return null
+          
+          return (
+            <div
+              key={id}
+              draggable
+              onDragStart={() => (dragItemRef.current = index)}
+              onDragEnter={() => (dragOverItemRef.current = index)}
+              onDragEnd={handleSort}
+              onDragOver={(e) => e.preventDefault()}
+              className={`min-h-[220px] cursor-grab active:cursor-grabbing rounded-[20px] transition-transform hover:scale-[1.01] ${id === 'income-sources' ? '' : `border border-zinc-200 dark:border-zinc-800 p-4 shadow-sm ${widget.color}`}`}
+            >
+              {id === 'income-sources' ? (
+                <IncomeSourcesWidget entries={periodEntries} />
+              ) : (
+                <div className="flex h-full flex-col items-center justify-center gap-2">
+                  <span className="text-sm font-semibold uppercase tracking-wider">{widget.label}</span>
+                  <span className="text-xs opacity-80">(Placeholder)</span>
+                </div>
+              )}
+            </div>
+          )
+        })}
       </div>
     </div>
   )
-}
-
-function ChartTooltip({ active, payload, label }: TooltipContentProps) {
-  if (!active || !payload?.length) return null
-
-  const point = payload.find((item) => item.payload)?.payload as ChartPoint | undefined
-  if (!point) return null
-
-  const overBudget = point.spent > point.budget
-  const borderClass = overBudget ? 'border-red-500/85' : 'border-emerald-500/85'
-  const spentClass = overBudget ? 'text-red-600 dark:text-red-700' : 'text-emerald-700 dark:text-emerald-700'
-
-  return (
-    <div className={`min-w-36 rounded-xl border ${borderClass} bg-white/72 px-3 py-2 text-[12px] shadow-lg shadow-zinc-900/10 backdrop-blur-md dark:bg-zinc-200/70 dark:shadow-black/25`}>
-      <div className="text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-800 dark:text-zinc-900">{label}</div>
-      <div className="mt-2 space-y-1">
-        <div className="flex items-center justify-between gap-4">
-          <span className="text-zinc-600 dark:text-zinc-800">Budget</span>
-          <span className="font-semibold tabular-nums text-blue-600 dark:text-blue-700">{formatCurrency(point.budget * 100)}</span>
-        </div>
-        <div className="flex items-center justify-between gap-4">
-          <span className="text-zinc-600 dark:text-zinc-800">Spent</span>
-          <span className={`font-semibold tabular-nums ${spentClass}`}>{formatCurrency(point.spent * 100)}</span>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function StatCard({ label, value, accent = 'text-zinc-900 dark:text-zinc-100' }: { label: string; value: string; accent?: string }) {
-  return (
-    <div className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
-      <div className="text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400">{label}</div>
-      <div className={`mt-2 text-2xl font-semibold ${accent}`}>{value}</div>
-    </div>
-  )
-}
-
-function getPeriodBudget(monthlyBudget: number, unit: PeriodUnit): number {
-  if (unit === 'day') {
-    const date = new Date()
-    return monthlyBudget / new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate()
-  }
-  if (unit === 'week') return (monthlyBudget * 12) / 52
-  return monthlyBudget
 }

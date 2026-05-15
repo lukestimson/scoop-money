@@ -648,8 +648,8 @@ export function Budget() {
   // --- Render ---
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-white dark:bg-zinc-950">
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-6 md:px-8">
+    <div className="flex flex-col bg-white dark:bg-zinc-950">
+      <div className="flex-1 px-4 py-6 md:px-8">
         <div className="mb-4 md:hidden">
           <BudgetFilterRail needFilter={needFilter} onNeedFilter={setNeedFilter} />
         </div>

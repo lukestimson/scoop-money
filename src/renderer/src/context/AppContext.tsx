@@ -2,12 +2,10 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 
 export type NavPage =
   | 'dashboard'
-  | 'expenses-budget'
-  | 'expenses-actual'
-  | 'expenses-summary'
-  | 'income-expected'
-  | 'income-actual'
-  | 'income-summary'
+  | 'living-expenses'
+  | 'income'
+  | 'transactions'
+  | 'analytics'
   | 'settings'
 
 interface AppContextValue {

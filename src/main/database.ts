@@ -114,6 +114,7 @@ CREATE TABLE IF NOT EXISTS income_entries (
   income_type TEXT NOT NULL DEFAULT '',
   date INTEGER NOT NULL,
   amount INTEGER NOT NULL DEFAULT 0,
+  tip INTEGER,
   notes TEXT DEFAULT '',
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
@@ -655,6 +656,7 @@ export function initDatabase(userDataPath: string): void {
   ensureBudgetLineItemsHasIsNeedColumn()
   ensureTransactionsHasIncomeCandidateColumn()
   ensureIncomeEntriesHasIncomeTypeColumn()
+  ensureIncomeEntriesHasTipColumn()
   seedDefaults()
   ensureCoreAccounts()
   runDateOnlyUtcMigration()
@@ -959,6 +961,14 @@ function ensureIncomeEntriesHasIncomeTypeColumn(): void {
   }
 }
 
+function ensureIncomeEntriesHasTipColumn(): void {
+  const db = getDb()
+  const cols = db.prepare('PRAGMA table_info(income_entries)').all() as { name: string }[]
+  if (!cols.some((c) => c.name === 'tip')) {
+    db.exec('ALTER TABLE income_entries ADD COLUMN tip INTEGER')
+  }
+}
+
 function ensureBudgetLineItemsHasIsNeedColumn(): void {
   const db = getDb()
   if (budgetLineItemsHasIsNeedColumn(db)) return
@@ -1170,18 +1180,18 @@ function rowToBudgetLineItem(row: unknown): BudgetLineItem {
   }
 }
 
-function rowToIncomeEntry(row: unknown): IncomeEntry {
-  const r = row as Record<string, unknown>
+function rowToIncomeEntry(row: any): IncomeEntry {
   return {
-    id: Number(r.id),
-    shoot_name: String(r.shoot_name ?? ''),
-    company: String(r.company ?? ''),
-    income_type: String(r.income_type ?? ''),
-    date: Number(r.date ?? 0),
-    amount: Number(r.amount ?? 0),
-    notes: String(r.notes ?? ''),
-    created_at: Number(r.created_at ?? 0),
-    updated_at: Number(r.updated_at ?? 0)
+    id: row.id,
+    shoot_name: row.shoot_name,
+    company: row.company,
+    income_type: row.income_type,
+    date: row.date,
+    amount: row.amount,
+    tip: row.tip ?? 0,
+    notes: row.notes,
+    created_at: row.created_at,
+    updated_at: row.updated_at
   }
 }
 
@@ -1644,23 +1654,35 @@ export function createIncomeEntry(data: Partial<IncomeEntry>): IncomeEntry {
   const incomeType = String(data.income_type ?? '').trim() || inferIncomeTypeFromText(company, shootName, notes)
   const result = getDb()
     .prepare(
-      `INSERT INTO income_entries (shoot_name, company, income_type, date, amount, notes, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO income_entries (shoot_name, company, income_type, date, amount, tip, notes, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(shootName, company, incomeType, data.date ?? stamp, Math.round(data.amount ?? 0), notes, stamp, stamp)
+    .run(
+      shootName,
+      company,
+      incomeType,
+      data.date ?? stamp,
+      Math.round(data.amount ?? 0),
+      data.tip !== undefined && data.tip !== null ? Math.round(data.tip) : null,
+      notes,
+      stamp,
+      stamp
+    )
   return getIncomeEntryById(Number(result.lastInsertRowid))
 }
 
 export function updateIncomeEntry(id: number, data: Partial<IncomeEntry>): IncomeEntry {
   const existing = getIncomeEntryById(id)
+  const tipVal = data.tip === null ? null : data.tip !== undefined ? Math.round(data.tip) : existing.tip
   getDb()
-    .prepare('UPDATE income_entries SET shoot_name = ?, company = ?, income_type = ?, date = ?, amount = ?, notes = ?, updated_at = ? WHERE id = ?')
+    .prepare('UPDATE income_entries SET shoot_name = ?, company = ?, income_type = ?, date = ?, amount = ?, tip = ?, notes = ?, updated_at = ? WHERE id = ?')
     .run(
       data.shoot_name ?? existing.shoot_name,
       data.company ?? existing.company,
       data.income_type ?? existing.income_type,
       data.date ?? existing.date,
       Math.round(data.amount ?? existing.amount),
+      tipVal,
       data.notes ?? existing.notes,
       now(),
       id

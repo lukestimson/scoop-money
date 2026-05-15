@@ -1,11 +1,16 @@
 import {
+  addMonths,
+  addWeeks,
+  addYears,
   endOfDay,
   endOfMonth,
   endOfWeek,
+  endOfYear,
   format,
   startOfDay,
   startOfMonth,
-  startOfWeek
+  startOfWeek,
+  startOfYear
 } from 'date-fns'
 import type { PeriodGroup, Transaction } from '../../../types/money'
 
@@ -49,4 +54,37 @@ export function groupTransactionsByPeriod(transactions: Transaction[], unit: Per
 
 export function monthBounds(date = new Date()): { start: number; end: number } {
   return getPeriodBounds('month', date)
+}
+
+export type DisplayPeriod = 'week' | 'month' | 'year'
+
+export function getDisplayPeriodBounds(anchor: Date, period: DisplayPeriod): { start: number; end: number } {
+  if (period === 'week') {
+    const s = startOfWeek(anchor, { weekStartsOn: 1 })
+    const e = endOfWeek(anchor, { weekStartsOn: 1 })
+    return { start: Math.floor(s.getTime() / 1000), end: Math.floor(e.getTime() / 1000) }
+  }
+  if (period === 'year') {
+    const s = startOfYear(anchor)
+    const e = endOfYear(anchor)
+    return { start: Math.floor(s.getTime() / 1000), end: Math.floor(e.getTime() / 1000) }
+  }
+  const s = startOfMonth(anchor)
+  const e = endOfMonth(anchor)
+  return { start: Math.floor(s.getTime() / 1000), end: Math.floor(e.getTime() / 1000) }
+}
+
+export function stepDisplayAnchor(anchor: Date, period: DisplayPeriod, dir: 1 | -1): Date {
+  if (period === 'week') return addWeeks(anchor, dir)
+  if (period === 'year') return addYears(anchor, dir)
+  return addMonths(anchor, dir)
+}
+
+export function formatDisplayAnchor(anchor: Date, period: DisplayPeriod): string {
+  if (period === 'week') {
+    const s = startOfWeek(anchor, { weekStartsOn: 1 })
+    return `${format(s, 'MMM d')} - ${format(endOfWeek(anchor, { weekStartsOn: 1 }), 'MMM d, yyyy')}`
+  }
+  if (period === 'year') return format(anchor, 'yyyy')
+  return format(anchor, 'MMM yyyy')
 }

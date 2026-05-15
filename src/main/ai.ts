@@ -251,6 +251,7 @@ async function chatWithAnthropic(
       const result = executeTool(block.name, block.input)
       if (
         block.name === 'create_income_entry' ||
+        block.name === 'update_income_entry' ||
         block.name === 'create_transaction' ||
         block.name === 'update_transaction' ||
         block.name === 'create_budget_line_item' ||
@@ -309,6 +310,7 @@ async function chatWithOpenAi(
       const result = executeTool(call.function.name, parseToolArguments(call.function.arguments))
       if (
         call.function.name === 'create_income_entry' ||
+        call.function.name === 'update_income_entry' ||
         call.function.name === 'create_transaction' ||
         call.function.name === 'update_transaction' ||
         call.function.name === 'create_budget_line_item' ||
@@ -502,6 +504,7 @@ function buildSnapshot(): unknown {
   const totalExpenseOutflows = transactions.filter((tx) => tx.amount < 0).reduce((sum, tx) => sum + Math.abs(tx.amount), 0)
   const totalExpenseOffsets = transactions.filter((tx) => tx.amount > 0).reduce((sum, tx) => sum + tx.amount, 0)
   const totalIncome = income.reduce((sum, entry) => sum + entry.amount, 0)
+  const knownIncomeTypes = Array.from(new Set(income.map((i) => i.income_type).filter(Boolean)))
   const budgetLines = getAllBudgetLineItems().slice(0, 160).map((line) => ({
     id: line.id,
     category: line.category,
@@ -526,7 +529,8 @@ function buildSnapshot(): unknown {
     budgetLineItems: budgetLines,
     accounts: getAllAccounts().map((account) => ({ id: account.id, name: account.name, type: account.type })),
     recentTransactions,
-    recentIncome
+    recentIncome,
+    knownIncomeTypes
   }
 }
 
@@ -596,14 +600,43 @@ function monthKey(timestamp: number): string {
 function executeTool(name: string, input: unknown): unknown {
   const data = input as Record<string, unknown>
   if (name === 'create_income_entry') {
-    return createIncomeEntry({
-      shoot_name: String(data.shoot_name ?? ''),
+    const normalizedDate = normalizeDate(data.date)
+    const normalizedAmount = data.amount_cents !== undefined ? Math.round(Number(data.amount_cents)) : normalizeAmount(data.amount)
+    const normalizedTip = data.tip_cents !== undefined ? Math.round(Number(data.tip_cents)) : (data.tip !== undefined && data.tip !== null ? normalizeAmount(data.tip) : null)
+    
+    const shootName = String(data.shoot_name ?? '')
+    const existing = getAllIncomeEntries().find(e => e.date === normalizedDate && e.amount === normalizedAmount && e.shoot_name === shootName)
+    if (existing) return { error: `Duplicate entry found with id ${existing.id}. Use update_income_entry if you meant to modify it.` }
+
+    const row = createIncomeEntry({
+      shoot_name: shootName,
       company: String(data.company ?? ''),
       income_type: String(data.income_type ?? ''),
-      date: normalizeDate(data.date),
-      amount: normalizeAmount(data.amount),
+      date: normalizedDate,
+      amount: normalizedAmount,
+      tip: normalizedTip,
       notes: String(data.notes ?? '')
     })
+    return { success: true, id: row.id }
+  }
+  if (name === 'update_income_entry') {
+    const id = Number(data.id)
+    if (!Number.isFinite(id)) return { error: 'id must be a number' }
+    const patch: Parameters<typeof updateIncomeEntry>[1] = {}
+    if (data.shoot_name !== undefined) patch.shoot_name = String(data.shoot_name)
+    if (data.company !== undefined) patch.company = String(data.company)
+    if (data.income_type !== undefined) patch.income_type = String(data.income_type)
+    if (data.date !== undefined) patch.date = normalizeDate(data.date)
+    if (data.amount !== undefined || data.amount_cents !== undefined) {
+      patch.amount = data.amount_cents !== undefined ? Math.round(Number(data.amount_cents)) : normalizeAmount(data.amount)
+    }
+    if (data.tip !== undefined || data.tip_cents !== undefined) {
+      patch.tip = data.tip_cents !== undefined ? Math.round(Number(data.tip_cents)) : (data.tip === null ? null : normalizeAmount(data.tip))
+    }
+    if (data.notes !== undefined) patch.notes = String(data.notes)
+    
+    const row = updateIncomeEntry(id, patch)
+    return { success: true, id: row.id }
   }
   if (name === 'get_spending_summary') {
     const category = data.category ? String(data.category) : ''
@@ -756,12 +789,35 @@ const APP_TOOLS = [
       properties: {
         shoot_name: { type: 'string' },
         company: { type: 'string', description: 'Main POC or client name from the shoot title or description' },
-        income_type: { type: 'string', description: 'Income platform or channel, for example Snappr, Thumbtack, Upwork, or Stimsonphoto' },
+        income_type: { type: 'string', description: 'Income platform or channel. Refer to knownIncomeTypes in money_data for correct naming.' },
         date: { type: ['string', 'number'] },
-        amount: { type: ['string', 'number'] },
+        amount: { type: ['string', 'number'], description: 'Dollar amount.' },
+        amount_cents: { type: 'number', description: 'Integer cents.' },
+        tip: { type: ['string', 'number'], description: 'Dollar amount of tip, if any.' },
+        tip_cents: { type: 'number', description: 'Integer cents of tip, if any.' },
         notes: { type: 'string' }
       },
       required: ['shoot_name', 'date', 'amount']
+    }
+  },
+  {
+    name: 'update_income_entry',
+    description: 'Update an existing income entry by id.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'number' },
+        shoot_name: { type: 'string' },
+        company: { type: 'string' },
+        income_type: { type: 'string' },
+        date: { type: ['string', 'number'] },
+        amount: { type: ['string', 'number'] },
+        amount_cents: { type: 'number' },
+        tip: { type: ['string', 'number'] },
+        tip_cents: { type: 'number' },
+        notes: { type: 'string' }
+      },
+      required: ['id']
     }
   },
   {

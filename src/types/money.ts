@@ -3,17 +3,11 @@ export type TransactionSource = 'csv_import' | 'manual' | 'ai'
 export type BudgetType = 'standard' | 'with_aid' | 'with_parents'
 export type PageId =
   | 'dashboard'
-  | 'expenses-budget'
-  | 'expenses-actual'
-  | 'expenses-summary'
-  | 'income-expected'
-  | 'income-actual'
-  | 'income-summary'
-  | 'settings'
-  | 'transactions'
-  | 'budget'
-  | 'summary'
+  | 'living-expenses'
   | 'income'
+  | 'transactions'
+  | 'analytics'
+  | 'settings'
 export type BudgetSupportScope = 'none' | 'parental' | 'government'
 export type IncomeKind = 'w2' | 'self_employment' | 'other'
 export type FilingStatus = 'single'
@@ -79,6 +73,7 @@ export interface IncomeEntry {
   income_type: string
   date: number
   amount: number
+  tip?: number | null
   notes: string
   created_at: number
   updated_at: number
