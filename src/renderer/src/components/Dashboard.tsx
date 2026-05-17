@@ -1,6 +1,10 @@
 import { useState, useRef, useEffect, useMemo, ReactNode } from 'react'
 import { DisplayPeriod, getDisplayPeriodBounds, stepDisplayAnchor, formatDisplayAnchor } from '../lib/dates'
 import { IncomeEntry } from '../../../types/money'
+import { incomeTypeChipPresentation } from '../lib/incomeTypeColors'
+import { useAppContext } from '../context/AppContext'
+import { SpendingBreakdownWidget } from './SpendingBreakdownWidget'
+import { AssetsWidget } from './AssetsWidget'
 
 function SegmentedButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
   return (
@@ -30,38 +34,39 @@ function IncomeSourcesWidget({ entries }: { entries: IncomeEntry[] }) {
   const sourceTotals = useMemo(() => {
     const totals = new Map<string, number>()
     for (const entry of entries) {
-      const t = entry.type || entry.income_kind || 'Unknown'
+      const t = entry.income_type?.trim() || 'Unknown'
       totals.set(t, (totals.get(t) || 0) + entry.amount)
     }
-    return Array.from(totals.entries()).sort((a, b) => a[1] - b[1]) // Ascending to match typical "growth" visuals, or just sort stable
+    return Array.from(totals.entries()).sort((a, b) => b[1] - a[1])
   }, [entries])
 
-  const maxTotal = Math.max(...sourceTotals.map(([, total]) => total), 1)
-
-  const colors = [
-    'bg-white',
-    'bg-[#f43f5e]', // rose-500 equivalent
-    'bg-white',
-    'bg-[#34d399]' // emerald-400 equivalent
-  ]
+  const totalIncome = sourceTotals.reduce((sum, [, total]) => sum + total, 0)
+  const chartHeightPx = 156
 
   return (
     <div className="flex h-full w-full flex-col rounded-[20px] bg-[#1c1c1e] p-6 shadow-sm">
       <h2 className="mb-6 text-lg font-semibold tracking-tight text-white">Income Source</h2>
-      <div className="flex h-full min-h-[140px] flex-1 items-end justify-between gap-4 overflow-x-auto pb-2">
+      <div className="flex min-h-[156px] flex-1 items-end justify-between gap-4 overflow-x-auto pb-2">
         {sourceTotals.length === 0 ? (
           <div className="flex h-full w-full items-center justify-center text-sm text-zinc-500">No income this period</div>
         ) : (
-          sourceTotals.map(([source, total], idx) => {
-            const heightPercent = Math.max((total / maxTotal) * 100, 8)
+          sourceTotals.map(([source, total]) => {
+            const fraction = totalIncome > 0 ? total / totalIncome : 0
+            const heightPx = total > 0 ? Math.max(10, Math.round(fraction * chartHeightPx)) : 0
+            const tone = incomeTypeChipPresentation(source, '')
             return (
-              <div key={source} className="flex flex-col items-center justify-end gap-2 shrink-0 flex-1">
+              <div key={source} className="flex h-full flex-1 shrink-0 flex-col items-center justify-end gap-2">
                 <div className="text-sm font-bold text-white">{formatCurrencyNoCents(total)}</div>
-                <div 
-                  className={`w-full max-w-[40px] rounded-sm ${colors[idx % colors.length]}`} 
-                  style={{ height: `${heightPercent}%`, minHeight: '6px' }} 
+                <div
+                  className="w-full max-w-[40px] rounded-sm"
+                  style={{
+                    backgroundColor: (tone.style?.backgroundColor as string) || '#ffffff',
+                    height: `${heightPx}px`
+                  }}
                 />
-                <div className="mt-1 text-[11px] font-medium text-white text-center leading-tight">{source}</div>
+                <div className="mt-1 line-clamp-2 text-center text-[11px] font-medium leading-tight text-white">
+                  {source}
+                </div>
               </div>
             )
           })
@@ -97,6 +102,7 @@ function getInitialLayout() {
 }
 
 export function Dashboard() {
+  const { dataVersion } = useAppContext()
   const [layout, setLayout] = useState<string[]>(getInitialLayout)
   const dragItemRef = useRef<number | null>(null)
   const dragOverItemRef = useRef<number | null>(null)
@@ -110,7 +116,7 @@ export function Dashboard() {
 
   useEffect(() => {
     window.api.getIncomeEntries().then(setEntries)
-  }, [])
+  }, [dataVersion])
 
   useEffect(() => {
     localStorage.setItem(DASHBOARD_PERIOD_KEY, period)
@@ -172,10 +178,14 @@ export function Dashboard() {
               onDragEnter={() => (dragOverItemRef.current = index)}
               onDragEnd={handleSort}
               onDragOver={(e) => e.preventDefault()}
-              className={`min-h-[220px] cursor-grab active:cursor-grabbing rounded-[20px] transition-transform hover:scale-[1.01] ${id === 'income-sources' ? '' : `border border-zinc-200 dark:border-zinc-800 p-4 shadow-sm ${widget.color}`}`}
+              className={`cursor-grab active:cursor-grabbing rounded-[20px] transition-transform hover:scale-[1.01] ${id === 'income-sources' ? 'min-h-[220px]' : id === 'net-worth' ? `min-h-[220px] border border-zinc-200 dark:border-zinc-800 p-4 shadow-sm ${widget.color} md:col-span-2` : `min-h-[220px] border border-zinc-200 dark:border-zinc-800 p-4 shadow-sm ${widget.color}`}`}
             >
               {id === 'income-sources' ? (
                 <IncomeSourcesWidget entries={periodEntries} />
+              ) : id === 'net-worth' ? (
+                <AssetsWidget globalPeriod={period} globalStart={start} globalEnd={end} />
+              ) : id === 'spending-pie' ? (
+                <SpendingBreakdownWidget period={period} start={start} end={end} />
               ) : (
                 <div className="flex h-full flex-col items-center justify-center gap-2">
                   <span className="text-sm font-semibold uppercase tracking-wider">{widget.label}</span>
