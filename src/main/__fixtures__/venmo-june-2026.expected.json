@@ -1,0 +1,112 @@
+[
+  {
+    "date": 1780312919,
+    "description": "🍕 (Alex Rivera)",
+    "amount": -700,
+    "raw_category": "Dining",
+    "notes": "Venmo Payment paid | From: Chris Bell | To: Alex Rivera | Funding source: Venmo balance | Venmo ID: 1000000000000000001",
+    "mapped_category": "Dining",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780563464,
+    "description": "Photo shoot (Sam Chen)",
+    "amount": 75000,
+    "raw_category": "Business Expenses",
+    "notes": "Venmo Payment received | From: Sam Chen | To: Chris Bell | Destination: Venmo balance | Venmo ID: 1000000000000000002",
+    "mapped_category": "Business Expenses",
+    "income_candidate": true,
+    "external_id": null
+  },
+  {
+    "date": 1780631051,
+    "description": "Camisa’s (Jordan Lee)",
+    "amount": -2200,
+    "raw_category": "Uncategorized",
+    "notes": "Venmo Payment paid | From: Chris Bell | To: Jordan Lee | Funding source: Venmo balance | Venmo ID: 1000000000000000003",
+    "mapped_category": "Uncategorized",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780631075,
+    "description": "“Why don’t you love me?!” (Chris Bell)",
+    "amount": -575,
+    "raw_category": "Uncategorized",
+    "notes": "Venmo Charge paid | From: Taylor Kim | To: Chris Bell | Funding source: Venmo balance | Venmo ID: 1000000000000000004",
+    "mapped_category": "Uncategorized",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1781679867,
+    "description": "Mini monestera (Morgan Diaz)",
+    "amount": -1400,
+    "raw_category": "Uncategorized",
+    "notes": "Venmo Payment paid | From: Chris Bell | To: Morgan Diaz | Funding source: Venmo balance | Venmo ID: 1000000000000000005",
+    "mapped_category": "Uncategorized",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1781962416,
+    "description": "🍕 (Casey Patel)",
+    "amount": 10000,
+    "raw_category": "Dining",
+    "notes": "Venmo Payment received | From: Casey Patel | To: Chris Bell | Destination: Venmo balance | Venmo ID: 1000000000000000006",
+    "mapped_category": "Dining",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1781962811,
+    "description": "🍕 (Jamie Brooks)",
+    "amount": -8300,
+    "raw_category": "Dining",
+    "notes": "Venmo Payment paid | From: Chris Bell | To: Jamie Brooks | Funding source: Venmo balance | Venmo ID: 1000000000000000007",
+    "mapped_category": "Dining",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1782366167,
+    "description": "Amazon goodies (Taylor Kim)",
+    "amount": -19400,
+    "raw_category": "Shopping",
+    "notes": "Venmo Payment paid | From: Chris Bell | To: Taylor Kim | Funding source: Venmo balance | Venmo ID: 1000000000000000008",
+    "mapped_category": "Shopping",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1782674816,
+    "description": "Film ⛽ (Riley Foster)",
+    "amount": 3300,
+    "raw_category": "Business Expenses",
+    "notes": "Venmo Payment received | From: Riley Foster | To: Chris Bell | Destination: Venmo balance | Venmo ID: 1000000000000000009",
+    "mapped_category": "Business Expenses",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1782693856,
+    "description": "Eye mask👀 (Taylor Kim)",
+    "amount": -1500,
+    "raw_category": "Uncategorized",
+    "notes": "Venmo Payment paid | From: Chris Bell | To: Taylor Kim | Funding source: Venmo balance | Venmo ID: 1000000000000000010",
+    "mapped_category": "Uncategorized",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1782694001,
+    "description": "Was only a $5 difference!\n\n$13.99 - $8.99 (Taylor Kim)",
+    "amount": 1000,
+    "raw_category": "Uncategorized",
+    "notes": "Venmo Payment received | From: Taylor Kim | To: Chris Bell | Destination: Venmo balance | Venmo ID: 1000000000000000011",
+    "mapped_category": "Uncategorized",
+    "income_candidate": false,
+    "external_id": null
+  }
+]

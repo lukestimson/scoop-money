@@ -1,5 +1,5 @@
 export type AccountType = 'capital_one' | 'venmo' | 'ebt' | 'chase'
-export type TransactionSource = 'csv_import' | 'manual' | 'ai'
+export type TransactionSource = 'csv_import' | 'manual' | 'ai' | 'plaid'
 export type BudgetType = 'standard' | 'with_aid' | 'with_parents'
 export type PageId =
   | 'dashboard'
@@ -8,10 +8,19 @@ export type PageId =
   | 'transactions'
   | 'analytics'
   | 'settings'
+  | 'expenses-budget'
+  | 'expenses-actual'
+  | 'expenses-summary'
+  | 'income-expected'
+  | 'income-actual'
+  | 'income-summary'
+  | 'budget'
+  | 'summary'
 export type BudgetSupportScope = 'none' | 'parental' | 'government'
 export type IncomeKind = 'w2' | 'self_employment' | 'other'
 export type FilingStatus = 'single'
 export type AiProvider = 'anthropic' | 'openai'
+export type ImportRuleProvider = 'capital_one'
 
 export interface Account {
   id: number
@@ -19,6 +28,8 @@ export interface Account {
   type: AccountType
   institution: string
   color: string
+  /** Unix seconds. CSV owns transactions before this instant; Plaid owns them on/after. null = no cutover. */
+  plaid_cutover_date: number | null
   created_at: number
 }
 
@@ -33,6 +44,64 @@ export interface Transaction {
   source: TransactionSource
   notes: string
   income_candidate: boolean
+  /** Provider (Plaid) transaction id used for dedup; null for non-Plaid rows. */
+  external_id: string | null
+  created_at: number
+  updated_at: number
+}
+
+/**
+ * A linked Plaid Item (one login at one institution).
+ * Relationship: one PlaidItem has many PlaidAccounts (via item_id).
+ */
+export interface PlaidItem {
+  id: number
+  /** Plaid's item_id. */
+  item_id: string
+  institution_id: string | null
+  institution_name: string | null
+  /** Reference/handle to the access token; the real token lives in the OS keychain, never here. */
+  access_token_ref: string
+  /** Plaid transactions sync cursor; null before the first sync. */
+  cursor: string | null
+  status: string
+  error: string | null
+  created_at: number
+  updated_at: number
+}
+
+/**
+ * A Plaid account belonging to a PlaidItem, mapped onto a local Account.
+ * Relationship: many PlaidAccounts belong to one PlaidItem (via item_id);
+ * account_id references a local accounts.id.
+ */
+export interface PlaidAccount {
+  id: number
+  /** Plaid's account_id. */
+  plaid_account_id: string
+  /** References the owning PlaidItem's item_id. */
+  item_id: string
+  /** References a local accounts.id. */
+  account_id: number
+  mask: string | null
+  name: string | null
+  subtype: string | null
+  created_at: number
+}
+
+/**
+ * Links a provider transaction to a local transaction row for dedup/reconciliation.
+ * Relationship: transaction_id references a local transactions.id.
+ */
+export interface PlaidTransactionLink {
+  id: number
+  /** Plaid's transaction_id. */
+  plaid_transaction_id: string
+  /** References a local transactions.id. */
+  transaction_id: number
+  pending: boolean
+  pending_transaction_id: string | null
+  last_provider_update: number | null
   created_at: number
   updated_at: number
 }
@@ -99,10 +168,24 @@ export interface IncomeTaxSettings {
   social_security_wage_base: number
 }
 
+export interface LivingExpensesSettings {
+  rent_ratio_target_x100: number
+  reserve_target_months: number
+}
+
 export interface CategoryMappingRule {
   id: number
   raw_category: string
   description_contains: string
+  mapped_category: string
+  priority: number
+  created_at: number
+}
+
+export interface ImportTransactionRule {
+  id: number
+  provider: ImportRuleProvider
+  match_text: string
   mapped_category: string
   priority: number
   created_at: number
@@ -174,9 +257,17 @@ export interface ChatAttachment {
   name: string
 }
 
+export interface AiUsageSummary {
+  apiCalls: number
+  inputTokens: number
+  outputTokens: number
+  costUsd: number
+}
+
 export interface ChatResult {
   text: string
   dataChanged: boolean
+  usage?: AiUsageSummary
 }
 
 export interface ModelInfo {
@@ -212,6 +303,7 @@ export interface PeriodGroup {
 }
 
 export interface MoneyAPI {
+  onMoneyDataMutated(callback: () => void): () => void
   onTextScaleCommand(
     callback: (command: { kind: 'delta'; delta: number } | { kind: 'reset' }) => void
   ): () => void
@@ -248,16 +340,31 @@ export interface MoneyAPI {
   deleteIncomeEntry(id: number): Promise<void>
   getExpectedIncomeEntries(): Promise<ExpectedIncomeEntry[]>
   createExpectedIncomeEntry(data: Partial<ExpectedIncomeEntry>): Promise<ExpectedIncomeEntry>
-  updateExpectedIncomeEntry(id: number, data: Partial<ExpectedIncomeEntry>): Promise<ExpectedIncomeEntry>
+  updateExpectedIncomeEntry(
+    id: number,
+    data: Partial<ExpectedIncomeEntry>
+  ): Promise<ExpectedIncomeEntry>
   deleteExpectedIncomeEntry(id: number): Promise<void>
   getIncomeTaxSettings(): Promise<IncomeTaxSettings>
   updateIncomeTaxSettings(data: Partial<IncomeTaxSettings>): Promise<IncomeTaxSettings>
+  getLivingExpensesSettings(): Promise<LivingExpensesSettings>
+  updateLivingExpensesSettings(
+    data: Partial<LivingExpensesSettings>
+  ): Promise<LivingExpensesSettings>
 
   getCategoryRules(): Promise<CategoryMappingRule[]>
   createCategoryRule(data: Partial<CategoryMappingRule>): Promise<CategoryMappingRule>
   updateCategoryRule(id: number, data: Partial<CategoryMappingRule>): Promise<CategoryMappingRule>
   deleteCategoryRule(id: number): Promise<void>
   recategorizeAllTransactions(): Promise<{ updated: number }>
+
+  getImportTransactionRules(provider?: ImportRuleProvider): Promise<ImportTransactionRule[]>
+  createImportTransactionRule(data: Partial<ImportTransactionRule>): Promise<ImportTransactionRule>
+  updateImportTransactionRule(
+    id: number,
+    data: Partial<ImportTransactionRule>
+  ): Promise<ImportTransactionRule>
+  deleteImportTransactionRule(id: number): Promise<void>
 
   chat(
     pageId: string,

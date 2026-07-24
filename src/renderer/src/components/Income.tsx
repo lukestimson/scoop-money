@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, MouseEvent, ReactNode } from 'react'
-import { addMonths, addWeeks, addYears, endOfMonth, endOfWeek, endOfYear, format, getDay, getDaysInMonth, startOfMonth, startOfWeek, startOfYear } from 'date-fns'
-import type { BudgetItem, ExpectedIncomeEntry, IncomeEntry, IncomeKind, IncomeTaxSettings } from '../../../types/money'
+import { addMonths, format, getDay, getDaysInMonth, startOfMonth, startOfWeek } from 'date-fns'
+import type { BudgetItem, BudgetLineItem, ExpectedIncomeEntry, IncomeEntry, IncomeKind, IncomeTaxSettings } from '../../../types/money'
 import { parseLocalDateToUnix } from '../../../types/dateParsing'
 import { useAppContext } from '../context/AppContext'
 import { useDateFormat } from '../context/DateFormatContext'
-import { getBudgetAmount, getStoredBudgetType } from '../lib/budget'
+import { getStoredBudgetType, loadStoredBudgetAidFilters, subscribeBudgetAidFilters, type BudgetAidFilter } from '../lib/budget'
 import { formatCurrency, parseCurrencyInput } from '../lib/currency'
-import { calculateIncomeTaxes, groupActualIncomeByMonth } from '../lib/income'
+import { calculateIncomeTaxes } from '../lib/income'
+import { computeLivingExpensesMetrics } from '../lib/livingExpensesMetrics'
 import { ChatBox } from './ChatBox'
+import { BudgetAidIndicators } from './BudgetAidIndicators'
 import { IncomeNotesPanel, type IncomeNotesPanelHandle } from './IncomeNotesPanel'
 import { IncomeTypeField, INCOME_TYPE_COLOR_EDITOR_SELECTOR, INCOME_TYPE_MENU_SELECTOR } from './IncomeTypeField'
 import { ListSectionSearchBar, type ListSearchPhase } from './ListSectionSearchBar'
@@ -26,8 +28,8 @@ const INCOME_KIND_OPTIONS: Array<{ value: IncomeKind; label: string; detail: str
   { value: 'other', label: 'Other', detail: 'Not payroll taxed here' }
 ]
 type IncomeSortKey = 'date' | 'amount' | 'name' | 'recent'
-type IncomeEditField = 'date' | 'shoot_name' | 'company' | 'income_type' | 'amount' | 'notes' | null
-type ExplanationPoint = { label: string; value: string }
+type IncomeEditField = 'date' | 'shoot_name' | 'company' | 'income_type' | 'tip' | 'amount' | 'notes' | 'all' | null
+type ExplanationPoint = { label: string; value: string; aidAdjusted?: boolean }
 type Explanation = {
   title: string
   summary: string
@@ -37,9 +39,7 @@ type Explanation = {
   y: number
 }
 
-const INCOME_PERIOD_KEY = 'scoop_income_actual_period'
 const INCOME_SORT_KEY = 'scoop_income_actual_sort'
-const INCOME_ANCHOR_KEY = 'scoop_income_actual_anchor'
 const INCOME_SORT_OPTIONS: ReadonlyArray<{ id: IncomeSortKey; label: string }> = [
   { id: 'date', label: 'Date' },
   { id: 'amount', label: 'Amount' },
@@ -47,16 +47,37 @@ const INCOME_SORT_OPTIONS: ReadonlyArray<{ id: IncomeSortKey; label: string }> =
   { id: 'recent', label: 'Recently Added' }
 ]
 
+function roundCentsToWholeDollars(cents: number): number {
+  return Math.round(cents / 100) * 100
+}
+
+function parseWholeDollarInput(value: string): number {
+  return roundCentsToWholeDollars(parseCurrencyInput(value))
+}
+
+function formatWholeDollarCurrency(cents: number): string {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0
+  }).format(Math.round(cents / 100))
+}
+
+function normalizeWholeDollarDraft(value: string): string {
+  const cleaned = value.replace(/[^\d-]/g, '')
+  if (!cleaned) return ''
+  if (cleaned === '-') return '-'
+  const isNegative = cleaned.startsWith('-')
+  const digits = cleaned.replace(/-/g, '')
+  if (!digits) return isNegative ? '-' : ''
+  return `${isNegative ? '-' : ''}$${digits}`
+}
+
 interface IncomeUndoAction {
   type: 'create_entry' | 'delete_entry'
   entryId?: number
   entries?: IncomeEntry[]
-}
-
-function getStoredIncomePeriod(): DisplayPeriod {
-  const value = localStorage.getItem(INCOME_PERIOD_KEY)
-  if (value === 'week' || value === 'month' || value === 'year') return value
-  return 'month'
 }
 
 function getStoredIncomeSort(): IncomeSortKey {
@@ -67,54 +88,73 @@ function getStoredIncomeSort(): IncomeSortKey {
   return 'date'
 }
 
-function getStoredIncomeAnchor(): Date {
-  const value = localStorage.getItem(INCOME_ANCHOR_KEY)
-  if (value) {
-    const parsed = new Date(value)
-    if (!Number.isNaN(parsed.getTime())) return parsed
-  }
-  return new Date()
-}
-
-export function IncomeExpected() {
+export function IncomeExpected({
+  period = 'month',
+  showTitle = true,
+  embedded = false
+}: {
+  period?: DisplayPeriod
+  showTitle?: boolean
+  embedded?: boolean
+} = {}) {
   const { dataVersion, bumpDataVersion } = useAppContext()
   const [entries, setEntries] = useState<ExpectedIncomeEntry[]>([])
   const [settings, setSettings] = useState<IncomeTaxSettings | null>(null)
   const [budget, setBudget] = useState<BudgetItem[]>([])
+  const [budgetLines, setBudgetLines] = useState<BudgetLineItem[]>([])
+  const [aidFilters, setAidFilters] = useState<Set<BudgetAidFilter>>(() => loadStoredBudgetAidFilters())
   const [explanation, setExplanation] = useState<Explanation | null>(null)
+  const [busy, setBusy] = useState<'idle' | 'loading' | 'saving'>('loading')
+  const budgetType = getStoredBudgetType()
 
   function reload(): void {
+    setBusy('loading')
     Promise.all([
       window.api.getExpectedIncomeEntries(),
       window.api.getIncomeTaxSettings(),
-      window.api.getBudgetItems(getStoredBudgetType())
-    ]).then(([nextEntries, nextSettings, nextBudget]) => {
+      window.api.getBudgetItems(budgetType),
+      window.api.getBudgetLineItems()
+    ]).then(([nextEntries, nextSettings, nextBudget, nextBudgetLines]) => {
       setEntries(nextEntries)
       setSettings(nextSettings)
       setBudget(nextBudget)
+      setBudgetLines(nextBudgetLines)
+      setBusy('idle')
+    }).catch(() => {
+      setBusy('idle')
     })
   }
 
-  useEffect(reload, [dataVersion])
+  useEffect(reload, [dataVersion, budgetType])
 
-  const tax = settings ? calculateIncomeTaxes(entries, settings) : null
-  const needs = budget.filter((item) => item.is_need).reduce((sum, item) => sum + getBudgetAmount(item, getStoredBudgetType()), 0)
-  const wants = budget.filter((item) => !item.is_need).reduce((sum, item) => sum + getBudgetAmount(item, getStoredBudgetType()), 0)
-  const afterTaxMonthly = tax ? tax.afterTaxIncome / 12 : 0
+  useEffect(() => {
+    return subscribeBudgetAidFilters(() => setAidFilters(loadStoredBudgetAidFilters()))
+  }, [])
+
+  const metrics = useMemo(
+    () => computeLivingExpensesMetrics({ entries, taxSettings: settings, budgetItems: budget, budgetLineItems: budgetLines, aidFilters, budgetType, period }),
+    [entries, settings, budget, budgetLines, aidFilters, budgetType, period]
+  )
+  const tax = metrics.tax
+  const periodLabel = period === 'week' ? 'Week' : period === 'year' ? 'Year' : 'Month'
 
   async function updateEntry(id: number, data: Partial<ExpectedIncomeEntry>): Promise<void> {
+    setBusy('saving')
     await window.api.updateExpectedIncomeEntry(id, data)
     reload()
     bumpDataVersion()
   }
 
   async function updateSettings(data: Partial<IncomeTaxSettings>): Promise<void> {
+    setBusy('saving')
     const next = await window.api.updateIncomeTaxSettings(data)
     setSettings(next)
+    setBusy('idle')
     bumpDataVersion()
   }
 
   async function addIncomeSource(): Promise<void> {
+    setBusy('saving')
     await window.api.createExpectedIncomeEntry({
       name: 'New Income Source',
       notes: '',
@@ -131,11 +171,13 @@ export function IncomeExpected() {
   }
 
   return (
-    <div className="relative px-8 py-8" onClick={() => explanation && setExplanation(null)}>
-      <div className="mb-5">
-        <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">Income & Taxes</h1>
-        <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">Expected gross income, tax estimate, and after-tax room against your expense plan.</p>
-      </div>
+    <div className={`relative px-8 py-8 ${embedded ? 'border-b border-zinc-200 dark:border-zinc-800' : ''}`} onClick={() => explanation && setExplanation(null)}>
+      {showTitle ? (
+        <div className="mb-5">
+          <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">Income & Taxes</h1>
+          <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">Expected gross income, tax estimate, and after-tax room against your expense plan.</p>
+        </div>
+      ) : null}
 
       {tax ? (
         <div className="mb-5 grid grid-cols-4 gap-3">
@@ -150,15 +192,20 @@ export function IncomeExpected() {
         <section className="mb-5 rounded-xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
           <div className="mb-3 flex items-center justify-between">
             <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Quick View</h2>
-            <div className="text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-400">Monthly run rate</div>
+            <div className="text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-400">{periodLabel} run rate</div>
           </div>
           <div className="grid grid-cols-6 gap-3 text-sm">
-            <QuickMetric label="Income / mo" value={formatCurrency(tax.grossIncome / 12)} />
-            <QuickMetric label="Tax reserve / mo" value={formatCurrency(tax.totalTaxes / 12)} accent="text-red-600" />
-            <QuickMetric label="After tax / mo" value={formatCurrency(afterTaxMonthly)} />
-            <QuickMetric label="Needs / mo" value={formatCurrency(needs)} />
-            <QuickMetric label="Wants / mo" value={formatCurrency(wants)} />
-            <QuickMetric label="Left over / mo" value={formatCurrency(afterTaxMonthly - needs - wants)} accent={afterTaxMonthly - needs - wants >= 0 ? 'text-emerald-600' : 'text-red-600'} />
+            <QuickMetric label={`Income / ${periodLabel.toLowerCase()}`} value={formatCurrency(metrics.grossForPeriod)} />
+            <QuickMetric label={`Tax reserve / ${periodLabel.toLowerCase()}`} value={formatCurrency(metrics.taxForPeriod)} accent="text-red-600" />
+            <QuickMetric label={`After tax / ${periodLabel.toLowerCase()}`} value={formatCurrency(metrics.afterTaxForPeriod)} />
+            <QuickMetric label={`Needs / ${periodLabel.toLowerCase()}`} value={formatCurrency(metrics.needsForPeriod)} aidFilters={aidFilters} />
+            <QuickMetric label={`Wants / ${periodLabel.toLowerCase()}`} value={formatCurrency(metrics.wantsForPeriod)} aidFilters={aidFilters} />
+            <QuickMetric
+              label={`Left over / ${periodLabel.toLowerCase()}`}
+              value={formatCurrency(metrics.allowanceForPeriod)}
+              accent={metrics.allowanceForPeriod >= 0 ? 'text-emerald-600' : 'text-red-600'}
+              aidFilters={aidFilters}
+            />
           </div>
         </section>
       ) : null}
@@ -179,31 +226,50 @@ export function IncomeExpected() {
           <div className="text-right">Remove</div>
         </div>
         {entries.map((entry) => (
-          <ExpectedIncomeRow key={entry.id} entry={entry} onUpdate={updateEntry} onDelete={async () => { await window.api.deleteExpectedIncomeEntry(entry.id); reload(); bumpDataVersion(); }} />
+          <ExpectedIncomeRow
+            key={entry.id}
+            entry={entry}
+            onUpdate={updateEntry}
+            onDelete={async () => {
+              setBusy('saving')
+              await window.api.deleteExpectedIncomeEntry(entry.id)
+              reload()
+              bumpDataVersion()
+            }}
+          />
         ))}
       </section>
 
       {settings && tax ? (
         <section className="grid grid-cols-[1fr_1fr] gap-5">
           <TaxInputs settings={settings} onUpdate={updateSettings} onExplain={openExplanation} />
-          <TaxResults result={tax} settings={settings} needs={needs} wants={wants} onExplain={openExplanation} />
+          <TaxResults
+            result={tax}
+            settings={settings}
+            needs={metrics.needsMonthly}
+            wants={metrics.wantsMonthly}
+            onExplain={openExplanation}
+          />
         </section>
       ) : null}
-      {explanation ? <ExplanationPopover explanation={explanation} onClose={() => setExplanation(null)} /> : null}
+      {explanation ? <ExplanationPopover explanation={explanation} aidFilters={aidFilters} onClose={() => setExplanation(null)} /> : null}
+      {busy !== 'idle' ? (
+        <div className="pointer-events-none absolute right-8 top-8 rounded-full bg-zinc-900 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.1em] text-white dark:bg-zinc-100 dark:text-zinc-950">
+          {busy === 'loading' ? 'Loading…' : 'Saving…'}
+        </div>
+      ) : null}
     </div>
   )
 }
 
 export function IncomeActual() {
-  const { dataVersion, bumpDataVersion } = useAppContext()
+  const { dataVersion, bumpDataVersion, anchor, setAnchor, period, setPeriod } = useAppContext()
   const { formatDate } = useDateFormat()
   const [entries, setEntries] = useState<IncomeEntry[]>([])
   const [selectedTypes, setSelectedTypes] = useState<string[]>([])
   const [customIncomeTypes, setCustomIncomeTypes] = useState<string[]>(() => loadCustomIncomeTypes())
   const [hiddenIncomeTypes, setHiddenIncomeTypes] = useState<Set<string>>(() => loadHiddenIncomeTypes())
   const [, setIncomeTypeColorRevision] = useState(0)
-  const [anchor, setAnchor] = useState(() => getStoredIncomeAnchor())
-  const [period, setPeriod] = useState<DisplayPeriod>(() => getStoredIncomePeriod())
   const [sortKey, setSortKey] = useState<IncomeSortKey>(() => getStoredIncomeSort())
   const [sortOpen, setSortOpen] = useState(false)
   const [calendarOpen, setCalendarOpen] = useState(false)
@@ -231,9 +297,7 @@ export function IncomeActual() {
     window.api.getIncomeEntries().then(setEntries)
   }, [dataVersion])
 
-  useEffect(() => { localStorage.setItem(INCOME_PERIOD_KEY, period) }, [period])
   useEffect(() => { localStorage.setItem(INCOME_SORT_KEY, sortKey) }, [sortKey])
-  useEffect(() => { localStorage.setItem(INCOME_ANCHOR_KEY, anchor.toISOString()) }, [anchor])
 
   useEffect(() => {
     if (!sortOpen) return
@@ -632,7 +696,7 @@ export function IncomeActual() {
                 <div className="text-right">Amount</div>
                 <div aria-hidden="true" />
               </div>
-              {adding ? <AddIncomeRow incomeTypes={incomeTypeOptions} onRegisterType={registerCustomIncomeType} onUnregisterType={unregisterCustomIncomeType} onRenameType={renameCustomIncomeType} onDone={handleAddDone} /> : null}
+              {adding ? <AddIncomeRow anchor={anchor} incomeTypes={incomeTypeOptions} onRegisterType={registerCustomIncomeType} onUnregisterType={unregisterCustomIncomeType} onRenameType={renameCustomIncomeType} onDone={handleAddDone} /> : null}
               {periodEntries.length === 0 && !adding ? (
                 <div className="px-4 py-10 text-center text-sm text-zinc-500 dark:text-zinc-400">Paste a shoot summary in chat or add an income row.</div>
               ) : visibleEntries.length === 0 && !adding ? (
@@ -755,7 +819,25 @@ function TaxInputs({
   onExplain: (event: MouseEvent, explanation: Omit<Explanation, 'x' | 'y'>) => void
 }) {
   const [isOpen, setIsOpen] = useState(false)
-  
+  const [globalEditMode, setGlobalEditMode] = useState(false)
+  const [draft, setDraft] = useState<IncomeTaxSettings>(settings)
+
+  useEffect(() => {
+    if (!globalEditMode) setDraft(settings)
+  }, [settings, globalEditMode])
+
+  async function saveGlobalEdits(): Promise<void> {
+    await onUpdate({
+      retirement_contribution: draft.retirement_contribution,
+      above_line_deductions: draft.above_line_deductions,
+      federal_standard_deduction: draft.federal_standard_deduction,
+      ca_standard_deduction: draft.ca_standard_deduction,
+      ca_bracket_adjustment: draft.ca_bracket_adjustment,
+      social_security_wage_base: draft.social_security_wage_base
+    })
+    setGlobalEditMode(false)
+  }
+
   return (
     <section className="rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
       <button 
@@ -776,13 +858,34 @@ function TaxInputs({
       </button>
       {isOpen ? (
         <div className="border-t border-zinc-100 p-4 pt-0 text-sm dark:border-zinc-800">
+          <div className="mt-3 flex justify-end">
+            {globalEditMode ? (
+              <button
+                type="button"
+                onClick={() => void saveGlobalEdits()}
+                className="flex h-7 w-7 items-center justify-center rounded-full text-emerald-600 transition-colors hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-950/30"
+                aria-label="Save tax assumptions"
+              >
+                <CheckIcon />
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setGlobalEditMode(true)}
+                className="flex h-7 w-7 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                aria-label="Edit all tax assumptions"
+              >
+                <PencilIcon />
+              </button>
+            )}
+          </div>
           <div className="mt-4 space-y-2">
-            <TaxInput label="401k / IRA contribution" value={settings.retirement_contribution} onSave={(value) => onUpdate({ retirement_contribution: value })} onExplain={(event) => onExplain(event, inputExplanation('401k / IRA contribution', 'Pre-tax retirement contributions reduce the federal AGI estimate used here.', settings.retirement_contribution))} />
-            <TaxInput label="Above-the-line deductions" value={settings.above_line_deductions} onSave={(value) => onUpdate({ above_line_deductions: value })} onExplain={(event) => onExplain(event, inputExplanation('Above-the-line deductions', 'Additional deductions subtracted before taxable income is calculated.', settings.above_line_deductions))} />
-            <TaxInput label="Federal standard deduction" value={settings.federal_standard_deduction} onSave={(value) => onUpdate({ federal_standard_deduction: value })} onExplain={(event) => onExplain(event, inputExplanation('Federal standard deduction', 'Deduction subtracted from federal AGI to estimate federal taxable income.', settings.federal_standard_deduction))} />
-            <TaxInput label="CA standard deduction" value={settings.ca_standard_deduction} onSave={(value) => onUpdate({ ca_standard_deduction: value })} onExplain={(event) => onExplain(event, inputExplanation('CA standard deduction', 'Deduction subtracted from federal AGI for the California taxable estimate.', settings.ca_standard_deduction))} />
-            <TaxInput label="CA bracket adjustment" value={settings.ca_bracket_adjustment} onSave={(value) => onUpdate({ ca_bracket_adjustment: value })} onExplain={(event) => onExplain(event, inputExplanation('CA bracket adjustment', 'Adjustment applied before running the California bracket estimate.', settings.ca_bracket_adjustment))} />
-            <TaxInput label="Social Security wage base" value={settings.social_security_wage_base} onSave={(value) => onUpdate({ social_security_wage_base: value })} onExplain={(event) => onExplain(event, inputExplanation('Social Security wage base', 'Maximum W-2 wage amount subject to Social Security tax in this estimate.', settings.social_security_wage_base))} />
+            <TaxInput label="401k / IRA contribution" value={settings.retirement_contribution} draftValue={draft.retirement_contribution} globalEditMode={globalEditMode} onDraftChange={(value) => setDraft((d) => ({ ...d, retirement_contribution: value }))} onSave={(value) => onUpdate({ retirement_contribution: value })} onExplain={(event) => onExplain(event, inputExplanation('401k / IRA contribution', 'Pre-tax retirement contributions reduce the federal AGI estimate used here.', globalEditMode ? draft.retirement_contribution : settings.retirement_contribution))} />
+            <TaxInput label="Above-the-line deductions" value={settings.above_line_deductions} draftValue={draft.above_line_deductions} globalEditMode={globalEditMode} onDraftChange={(value) => setDraft((d) => ({ ...d, above_line_deductions: value }))} onSave={(value) => onUpdate({ above_line_deductions: value })} onExplain={(event) => onExplain(event, inputExplanation('Above-the-line deductions', 'Additional deductions subtracted before taxable income is calculated.', globalEditMode ? draft.above_line_deductions : settings.above_line_deductions))} />
+            <TaxInput label="Federal standard deduction" value={settings.federal_standard_deduction} draftValue={draft.federal_standard_deduction} globalEditMode={globalEditMode} onDraftChange={(value) => setDraft((d) => ({ ...d, federal_standard_deduction: value }))} onSave={(value) => onUpdate({ federal_standard_deduction: value })} onExplain={(event) => onExplain(event, inputExplanation('Federal standard deduction', 'Deduction subtracted from federal AGI to estimate federal taxable income.', globalEditMode ? draft.federal_standard_deduction : settings.federal_standard_deduction))} />
+            <TaxInput label="CA standard deduction" value={settings.ca_standard_deduction} draftValue={draft.ca_standard_deduction} globalEditMode={globalEditMode} onDraftChange={(value) => setDraft((d) => ({ ...d, ca_standard_deduction: value }))} onSave={(value) => onUpdate({ ca_standard_deduction: value })} onExplain={(event) => onExplain(event, inputExplanation('CA standard deduction', 'Deduction subtracted from federal AGI for the California taxable estimate.', globalEditMode ? draft.ca_standard_deduction : settings.ca_standard_deduction))} />
+            <TaxInput label="CA bracket adjustment" value={settings.ca_bracket_adjustment} draftValue={draft.ca_bracket_adjustment} globalEditMode={globalEditMode} onDraftChange={(value) => setDraft((d) => ({ ...d, ca_bracket_adjustment: value }))} onSave={(value) => onUpdate({ ca_bracket_adjustment: value })} onExplain={(event) => onExplain(event, inputExplanation('CA bracket adjustment', 'Adjustment applied before running the California bracket estimate.', globalEditMode ? draft.ca_bracket_adjustment : settings.ca_bracket_adjustment))} />
+            <TaxInput label="Social Security wage base" value={settings.social_security_wage_base} draftValue={draft.social_security_wage_base} globalEditMode={globalEditMode} onDraftChange={(value) => setDraft((d) => ({ ...d, social_security_wage_base: value }))} onSave={(value) => onUpdate({ social_security_wage_base: value })} onExplain={(event) => onExplain(event, inputExplanation('Social Security wage base', 'Maximum W-2 wage amount subject to Social Security tax in this estimate.', globalEditMode ? draft.social_security_wage_base : settings.social_security_wage_base))} />
           </div>
         </div>
       ) : null}
@@ -1042,10 +1145,10 @@ function taxExplanation(
         calculation: 'After-tax annual income / 12 - needs per month - wants per month.',
         points: [
           { label: 'After tax / mo', value: formatCurrency(monthlyAfterTax) },
-          { label: 'Needs / mo', value: `-${formatCurrency(needs)}` },
-          { label: 'Wants / mo', value: `-${formatCurrency(wants)}` },
-          { label: 'Budget plan / mo', value: formatCurrency(totalPlan) },
-          { label: 'Left over / mo', value: formatCurrency(monthlyAfterTax - totalPlan) }
+          { label: 'Needs / mo', value: `-${formatCurrency(needs)}`, aidAdjusted: true },
+          { label: 'Wants / mo', value: `-${formatCurrency(wants)}`, aidAdjusted: true },
+          { label: 'Budget plan / mo', value: formatCurrency(totalPlan), aidAdjusted: true },
+          { label: 'Left over / mo', value: formatCurrency(monthlyAfterTax - totalPlan), aidAdjusted: true }
         ]
       }
     default:
@@ -1058,7 +1161,7 @@ function taxExplanation(
   }
 }
 
-function ExplanationPopover({ explanation, onClose }: { explanation: Explanation; onClose: () => void }) {
+function ExplanationPopover({ explanation, aidFilters, onClose }: { explanation: Explanation; aidFilters: Set<BudgetAidFilter>; onClose: () => void }) {
   const left = Math.min(explanation.x + 12, window.innerWidth - 380)
   const top = Math.max(16, Math.min(explanation.y + 12, window.innerHeight - 420))
 
@@ -1086,7 +1189,10 @@ function ExplanationPopover({ explanation, onClose }: { explanation: Explanation
         <div className="mt-3 overflow-hidden rounded-xl border border-zinc-100 dark:border-zinc-800">
           {explanation.points.map((point) => (
             <div key={point.label} className="flex items-center justify-between gap-4 border-b border-zinc-100 px-3 py-2 text-sm last:border-b-0 dark:border-zinc-800">
-              <span className="text-zinc-500 dark:text-zinc-400">{point.label}</span>
+              <span className="inline-flex items-center gap-1.5 text-zinc-500 dark:text-zinc-400">
+                {point.label}
+                {point.aidAdjusted ? <BudgetAidIndicators filters={aidFilters} /> : null}
+              </span>
               <span className="font-medium tabular-nums text-zinc-800 dark:text-zinc-100">{point.value}</span>
             </div>
           ))}
@@ -1163,7 +1269,7 @@ function IncomeRow({ entry, incomeTypes, onRegisterType, onUnregisterType, onRen
   const [shootDraft, setShootDraft] = useState(entry.shoot_name)
   const [companyDraft, setCompanyDraft] = useState(entry.company)
   const [typeDraft, setTypeDraft] = useState(resolveIncomeType(entry))
-  const [tipDraft, setTipDraft] = useState(entry.tip ? formatCurrency(entry.tip) : '')
+  const [tipDraft, setTipDraft] = useState(entry.tip ? formatWholeDollarCurrency(entry.tip) : '')
   const [amountDraft, setAmountDraft] = useState(formatCurrency(entry.amount))
   const [notesDraft, setNotesDraft] = useState(entry.notes)
   const rowRef = useRef<HTMLDivElement>(null)
@@ -1178,7 +1284,7 @@ function IncomeRow({ entry, incomeTypes, onRegisterType, onUnregisterType, onRen
     setShootDraft(entry.shoot_name)
     setCompanyDraft(entry.company)
     setTypeDraft(resolveIncomeType(entry))
-    setTipDraft(entry.tip ? formatCurrency(entry.tip) : '')
+    setTipDraft(entry.tip ? formatWholeDollarCurrency(entry.tip) : '')
     setAmountDraft(formatCurrency(entry.amount))
     setNotesDraft(entry.notes)
   }, [activeField, entry])
@@ -1193,7 +1299,7 @@ function IncomeRow({ entry, incomeTypes, onRegisterType, onUnregisterType, onRen
         company: companyDraft.trim(),
         income_type: typeDraft.trim(),
         amount: parseCurrencyInput(amountDraft),
-        tip: tipDraft.trim() ? parseCurrencyInput(tipDraft) : null,
+        tip: tipDraft.trim() ? parseWholeDollarInput(tipDraft) : null,
         notes: notesDraft
       })
       onChanged()
@@ -1238,7 +1344,7 @@ function IncomeRow({ entry, incomeTypes, onRegisterType, onUnregisterType, onRen
       setShootDraft(entry.shoot_name)
       setCompanyDraft(entry.company)
       setTypeDraft(resolveIncomeType(entry))
-      setTipDraft(entry.tip ? formatCurrency(entry.tip) : '')
+      setTipDraft(entry.tip ? formatWholeDollarCurrency(entry.tip) : '')
       setAmountDraft(formatCurrency(entry.amount))
       setNotesDraft(entry.notes)
       setActiveField(null)
@@ -1259,6 +1365,7 @@ function IncomeRow({ entry, incomeTypes, onRegisterType, onUnregisterType, onRen
   }
 
   const resolvedType = resolveIncomeType(entry)
+  const editAllTextFields = activeField === 'all'
   const unsetTypeClassName = 'inline-flex h-6 w-fit shrink-0 items-center whitespace-nowrap rounded-full px-2 text-[10px] font-semibold uppercase tracking-[0.06em] text-zinc-400 ring-1 ring-inset ring-zinc-200 bg-zinc-50 dark:bg-zinc-900/70 dark:text-zinc-500 dark:ring-zinc-800'
   const typeChipPresentation = resolvedType
     ? incomeTypeChipPresentation(
@@ -1270,20 +1377,20 @@ function IncomeRow({ entry, incomeTypes, onRegisterType, onUnregisterType, onRen
   return (
     <div ref={rowRef} className="group/row border-b border-zinc-100 last:border-b-0 dark:border-zinc-800" onContextMenu={onContextMenu}>
       <div className="grid grid-cols-[90px_minmax(0,1fr)_130px_minmax(140px,max-content)_50px_100px_64px] items-center gap-2 px-4 py-2.5 text-sm">
-        {activeField === 'date' ? (
-          <input autoFocus value={dateDraft} onChange={(event) => setDateDraft(event.target.value)} onKeyDown={handleKeyDown} className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-sm tabular-nums text-zinc-900 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:ring-zinc-800" />
+        {activeField === 'date' || editAllTextFields ? (
+          <input autoFocus={activeField === 'date' || activeField === 'all'} value={dateDraft} onChange={(event) => setDateDraft(event.target.value)} onKeyDown={handleKeyDown} className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-sm tabular-nums text-zinc-900 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:ring-zinc-800" />
         ) : (
           <button type="button" onClick={() => setActiveField('date')} className="flex h-7 min-w-0 items-center text-left text-zinc-500 dark:text-zinc-400">{formatDate(entry.date)}</button>
         )}
 
-        {activeField === 'shoot_name' ? (
-          <input autoFocus value={shootDraft} onChange={(event) => setShootDraft(event.target.value)} onKeyDown={handleKeyDown} className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-sm text-zinc-900 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:ring-zinc-800" />
+        {activeField === 'shoot_name' || editAllTextFields ? (
+          <input autoFocus={activeField === 'shoot_name'} value={shootDraft} onChange={(event) => setShootDraft(event.target.value)} onKeyDown={handleKeyDown} className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-sm text-zinc-900 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:ring-zinc-800" />
         ) : (
           <button type="button" onClick={() => setActiveField('shoot_name')} className="flex h-7 min-w-0 items-center truncate text-left font-medium text-zinc-900 dark:text-zinc-100">{entry.shoot_name || 'Untitled income'}</button>
         )}
 
-        {activeField === 'company' ? (
-          <input autoFocus value={companyDraft} onChange={(event) => setCompanyDraft(event.target.value)} onKeyDown={handleKeyDown} className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-sm text-zinc-900 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:ring-zinc-800" />
+        {activeField === 'company' || editAllTextFields ? (
+          <input autoFocus={activeField === 'company'} value={companyDraft} onChange={(event) => setCompanyDraft(event.target.value)} onKeyDown={handleKeyDown} className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-sm text-zinc-900 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:ring-zinc-800" />
         ) : (
           <button type="button" onClick={() => setActiveField('company')} className="flex h-7 min-w-0 items-center truncate text-left text-zinc-500 dark:text-zinc-400">{entry.company || 'No name'}</button>
         )}
@@ -1314,14 +1421,14 @@ function IncomeRow({ entry, incomeTypes, onRegisterType, onUnregisterType, onRen
         )}
 
         {/* --- TIP --- */}
-        {activeField === 'tip' ? (
-          <input autoFocus value={tipDraft} onChange={(event) => setTipDraft(event.target.value)} onKeyDown={handleKeyDown} className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-center text-xs tabular-nums text-emerald-700 outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-emerald-400 dark:focus:ring-zinc-800" placeholder="-" />
+        {activeField === 'tip' || editAllTextFields ? (
+          <input autoFocus={activeField === 'tip'} value={tipDraft} onChange={(event) => setTipDraft(normalizeWholeDollarDraft(event.target.value))} onKeyDown={handleKeyDown} inputMode="numeric" className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-center text-xs tabular-nums text-emerald-700 outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-emerald-400 dark:focus:ring-zinc-800" placeholder="-" />
         ) : (
           <button type="button" onClick={() => setActiveField('tip')} className="flex h-7 min-w-0 flex-col items-center justify-center transition-opacity hover:opacity-80">
             {entry.tip ? (
               <>
                 <span className="rounded-sm bg-emerald-100 px-1 text-[9px] font-bold leading-tight text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-500">TIP</span>
-                <span className="text-[11px] font-semibold leading-tight tabular-nums text-emerald-600 dark:text-emerald-500">{formatCurrency(entry.tip)}</span>
+                <span className="text-[11px] font-semibold leading-tight tabular-nums text-emerald-600 dark:text-emerald-500">{formatWholeDollarCurrency(entry.tip)}</span>
               </>
             ) : (
               <span className="text-sm font-medium text-zinc-300 dark:text-zinc-600">—</span>
@@ -1330,15 +1437,15 @@ function IncomeRow({ entry, incomeTypes, onRegisterType, onUnregisterType, onRen
         )}
 
         {/* --- AMOUNT --- */}
-        {activeField === 'amount' ? (
-          <input autoFocus value={amountDraft} onChange={(event) => setAmountDraft(event.target.value)} onKeyDown={handleKeyDown} className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-right text-sm tabular-nums text-zinc-900 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:ring-zinc-800" />
+        {activeField === 'amount' || editAllTextFields ? (
+          <input autoFocus={activeField === 'amount'} value={amountDraft} onChange={(event) => setAmountDraft(event.target.value)} onKeyDown={handleKeyDown} className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-right text-sm tabular-nums text-zinc-900 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:ring-zinc-800" />
         ) : (
           <button type="button" onClick={() => setActiveField('amount')} className="flex h-7 min-w-0 items-center justify-end font-medium tabular-nums text-zinc-900 dark:text-zinc-100">{formatCurrency(entry.amount)}</button>
         )}
 
         {editMode ? (
           <div className="flex items-center justify-end gap-1">
-            <button type="button" onClick={() => setActiveField('shoot_name')} aria-label={`Edit ${entry.shoot_name || 'income entry'}`} className="inline-flex h-6 w-6 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200">
+            <button type="button" onClick={() => setActiveField('all')} aria-label={`Edit ${entry.shoot_name || 'income entry'}`} className="inline-flex h-6 w-6 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200">
               <PencilIcon />
             </button>
             <button type="button" onClick={() => void onDelete()} aria-label={`Delete ${entry.shoot_name || 'income entry'}`} className="inline-flex h-6 w-6 items-center justify-center rounded-full text-zinc-300 transition-colors hover:bg-red-50 hover:text-red-600 dark:text-zinc-600 dark:hover:bg-red-950/30 dark:hover:text-red-300">
@@ -1383,30 +1490,52 @@ function IncomeRow({ entry, incomeTypes, onRegisterType, onUnregisterType, onRen
   )
 }
 
-function AddIncomeRow({ incomeTypes, onRegisterType, onUnregisterType, onRenameType, onDone }: { incomeTypes: string[]; onRegisterType: (type: string) => void; onUnregisterType: (type: string) => void; onRenameType: (from: string, to: string) => void; onDone: (created?: IncomeEntry) => void }) {
-  const [dateDraft, setDateDraft] = useState(formatIncomeDateInput(Math.floor(Date.now() / 1000)))
+function AddIncomeRow({ anchor, incomeTypes, onRegisterType, onUnregisterType, onRenameType, onDone }: { anchor: Date; incomeTypes: string[]; onRegisterType: (type: string) => void; onUnregisterType: (type: string) => void; onRenameType: (from: string, to: string) => void; onDone: (created?: IncomeEntry) => void }) {
+  const [dateValue, setDateValue] = useState<Date>(anchor)
   const [shootDraft, setShootDraft] = useState('')
   const [companyDraft, setCompanyDraft] = useState('')
   const [typeDraft, setTypeDraft] = useState('')
   const [tipDraft, setTipDraft] = useState('')
   const [amountDraft, setAmountDraft] = useState('')
-  const [notesDraft, setNotesDraft] = useState('')
-  const dateRef = useRef<HTMLInputElement>(null)
   const shootRef = useRef<HTMLInputElement>(null)
-  const typeInputRef = useRef<HTMLInputElement>(null)
+  const dateRef = useRef<HTMLDivElement>(null)
+  const [showDatePicker, setShowDatePicker] = useState(false)
 
   useEffect(() => shootRef.current?.focus(), [])
+  useEffect(() => { setDateValue(anchor) }, [anchor])
+
+  useEffect(() => {
+    if (!showDatePicker) return
+    const close = (e: PointerEvent) => {
+      if (dateRef.current && !dateRef.current.contains(e.target as Node)) setShowDatePicker(false)
+    }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setShowDatePicker(false) }
+    document.addEventListener('pointerdown', close)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('pointerdown', close)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [showDatePicker])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onDone()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [onDone])
 
   async function create(): Promise<void> {
     if (!amountDraft) return
     const created = await window.api.createIncomeEntry({
-      date: parseIncomeDateInput(dateDraft, Math.floor(Date.now() / 1000)),
+      date: Math.floor(new Date(dateValue.getFullYear(), dateValue.getMonth(), dateValue.getDate(), 12, 0, 0, 0).getTime() / 1000),
       shoot_name: shootDraft.trim(),
       company: companyDraft.trim(),
       income_type: typeDraft.trim(),
       amount: parseCurrencyInput(amountDraft),
-      tip: tipDraft.trim() ? parseCurrencyInput(tipDraft) : null,
-      notes: notesDraft
+      tip: tipDraft.trim() ? parseWholeDollarInput(tipDraft) : null,
+      notes: ''
     })
     onDone(created)
   }
@@ -1422,14 +1551,91 @@ function AddIncomeRow({ incomeTypes, onRegisterType, onUnregisterType, onRenameT
 
   return (
     <div className="grid grid-cols-[90px_minmax(0,1fr)_130px_minmax(140px,max-content)_50px_100px_64px] items-center gap-2 border-b border-zinc-100 bg-zinc-50 px-4 py-3 text-sm dark:border-zinc-800 dark:bg-zinc-950">
-      <input ref={dateRef} placeholder="Date" value={dateDraft} onChange={(e) => setDateDraft(e.target.value)} onKeyDown={handleKeyDown} className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-sm tabular-nums text-zinc-900 outline-none placeholder:text-zinc-400 focus:border-zinc-400 focus:ring-1 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:focus:ring-zinc-800" />
+      <div ref={dateRef} className="relative">
+        <button
+          type="button"
+          onClick={() => setShowDatePicker((value) => !value)}
+          className="truncate text-left text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100"
+        >
+          {format(dateValue, 'MMM d')}
+        </button>
+        {showDatePicker ? (
+          <IncomeMonthDayPicker
+            anchor={anchor}
+            selected={dateValue}
+            onSelect={(next) => {
+              setDateValue(next)
+              setShowDatePicker(false)
+            }}
+          />
+        ) : null}
+      </div>
       <input ref={shootRef} placeholder="Shoot name" value={shootDraft} onChange={(e) => setShootDraft(e.target.value)} onKeyDown={handleKeyDown} className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 focus:border-zinc-400 focus:ring-1 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:focus:ring-zinc-800" />
       <input placeholder="Company" value={companyDraft} onChange={(e) => setCompanyDraft(e.target.value)} onKeyDown={handleKeyDown} className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 focus:border-zinc-400 focus:ring-1 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:focus:ring-zinc-800" />
       <IncomeTypeField value={typeDraft} incomeTypes={incomeTypes} onChange={setTypeDraft} onRegisterType={onRegisterType} onUnregisterType={onUnregisterType} onRenameType={onRenameType} placeholder="Type" onKeyDown={handleKeyDown} onCommittedPick={(type) => setTypeDraft(type)} />
-      <input placeholder="Tip" value={tipDraft} onChange={(e) => setTipDraft(e.target.value)} onKeyDown={handleKeyDown} className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-center text-xs tabular-nums text-emerald-700 outline-none placeholder:text-zinc-400 focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-emerald-400 dark:focus:ring-zinc-800" />
+      <input placeholder="Tip" value={tipDraft} onChange={(e) => setTipDraft(normalizeWholeDollarDraft(e.target.value))} onKeyDown={handleKeyDown} inputMode="numeric" className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-center text-xs tabular-nums text-emerald-700 outline-none placeholder:text-zinc-400 focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-emerald-400 dark:focus:ring-zinc-800" />
       <input placeholder="$0.00" value={amountDraft} onChange={(e) => setAmountDraft(e.target.value)} onKeyDown={handleKeyDown} className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-right text-sm tabular-nums text-zinc-900 outline-none placeholder:text-zinc-400 focus:border-zinc-400 focus:ring-1 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:focus:ring-zinc-800" />
       <div className="flex items-center justify-end gap-2">
         <button type="button" onClick={() => void create()} className="inline-flex h-6 w-6 items-center justify-center rounded-full text-emerald-600 transition-colors hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-950/30" aria-label="Confirm income"><CheckIcon /></button>
+      </div>
+    </div>
+  )
+}
+
+function IncomeMonthDayPicker({ anchor, selected, onSelect }: { anchor: Date; selected: Date; onSelect: (date: Date) => void }) {
+  const [viewMonth, setViewMonth] = useState(() => startOfMonth(anchor))
+  const selectedYear = selected.getFullYear()
+  const selectedMonth = selected.getMonth()
+  const selectedDate = selected.getDate()
+  const daysInMonth = getDaysInMonth(viewMonth)
+  const firstDayOfMonth = getDay(viewMonth)
+  const startOffset = (firstDayOfMonth + 6) % 7
+  const cells: Array<{ date: Date; inMonth: boolean }> = []
+
+  for (let index = 0; index < startOffset; index += 1) {
+    cells.push({ date: new Date(viewMonth.getFullYear(), viewMonth.getMonth(), 1 - startOffset + index), inMonth: false })
+  }
+  for (let day = 1; day <= daysInMonth; day += 1) {
+    cells.push({ date: new Date(viewMonth.getFullYear(), viewMonth.getMonth(), day), inMonth: true })
+  }
+  while (cells.length % 7 !== 0) {
+    const last = cells[cells.length - 1].date
+    cells.push({ date: new Date(last.getFullYear(), last.getMonth(), last.getDate() + 1), inMonth: false })
+  }
+
+  return (
+    <div className="absolute left-0 top-full z-40 mt-1 w-[240px] rounded-lg border border-zinc-200/80 bg-white p-2 shadow-[0_4px_12px_rgba(0,0,0,0.12)] dark:border-zinc-600 dark:bg-zinc-900">
+      <div className="mb-2 flex items-center justify-between">
+        <button type="button" onClick={() => setViewMonth((month) => addMonths(month, -1))} className="px-1.5 py-0.5 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"><span className="inline-block -rotate-90"><SmallChevron /></span></button>
+        <span className="text-[12px] font-semibold text-zinc-800 dark:text-zinc-200">{format(viewMonth, 'MMMM yyyy')}</span>
+        <button type="button" onClick={() => setViewMonth((month) => addMonths(month, 1))} className="px-1.5 py-0.5 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"><span className="inline-block rotate-90"><SmallChevron /></span></button>
+      </div>
+      <div className="mb-1 grid grid-cols-7 gap-0">
+        {WEEKDAY_LABELS.map((day) => <div key={day} className="py-0.5 text-center text-[9px] font-medium text-zinc-400 dark:text-zinc-500">{day}</div>)}
+      </div>
+      <div className="grid grid-cols-7 gap-0">
+        {cells.map((cell, cellIndex) => {
+          const isSelected =
+            cell.date.getFullYear() === selectedYear &&
+            cell.date.getMonth() === selectedMonth &&
+            cell.date.getDate() === selectedDate
+          return (
+            <button
+              key={`${cell.date.toISOString()}-${cellIndex}`}
+              type="button"
+              onClick={() => onSelect(cell.date)}
+              className={`rounded-md py-1 text-center text-[11px] transition-colors ${
+                isSelected
+                  ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950'
+                  : cell.inMonth
+                    ? 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-950'
+                    : 'text-zinc-300 hover:bg-zinc-50 dark:text-zinc-600 dark:hover:bg-zinc-950'
+              }`}
+            >
+              {cell.date.getDate()}
+            </button>
+          )
+        })}
       </div>
     </div>
   )
@@ -1656,11 +1862,83 @@ function incomeBadgeClass(type: string): string {
   return 'bg-violet-50 text-violet-700 ring-violet-200 dark:bg-violet-950/30 dark:text-violet-300 dark:ring-violet-900'
 }
 
-function TaxInput({ label, value, onSave, onExplain }: { label: string; value: number; onSave: (value: number) => Promise<void>; onExplain: (event: MouseEvent) => void }) {
+function TaxInput({
+  label,
+  value,
+  draftValue,
+  globalEditMode,
+  onDraftChange,
+  onSave,
+  onExplain
+}: {
+  label: string
+  value: number
+  draftValue: number
+  globalEditMode: boolean
+  onDraftChange: (value: number) => void
+  onSave: (value: number) => Promise<void>
+  onExplain: (event: MouseEvent) => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(formatCurrency(value))
+  const [globalDraft, setGlobalDraft] = useState(formatCurrency(draftValue))
+
+  useEffect(() => {
+    if (!globalEditMode && !editing) setDraft(formatCurrency(value))
+  }, [value, globalEditMode, editing])
+
+  useEffect(() => {
+    if (globalEditMode) setGlobalDraft(formatCurrency(draftValue))
+  }, [globalEditMode, draftValue])
+
+  function updateDraftValue(nextRaw: string): void {
+    setDraft(nextRaw)
+    onDraftChange(parseCurrencyInput(nextRaw))
+  }
+
+  async function commitSingleEdit(): Promise<void> {
+    const parsed = parseCurrencyInput(draft)
+    await onSave(parsed)
+    setEditing(false)
+  }
+
   return (
     <div onContextMenu={onExplain} className="flex items-center justify-between gap-4 rounded-lg bg-zinc-50 px-3 py-2 dark:bg-zinc-950">
       <span className="text-zinc-600 dark:text-zinc-300">{label}</span>
-      <EditablePlain value={formatCurrency(value)} align="right" onSave={(next) => onSave(parseCurrencyInput(next))} className="font-medium" />
+      {globalEditMode ? (
+        <input
+          value={globalDraft}
+          onChange={(event) => {
+            const next = event.target.value
+            setGlobalDraft(next)
+            updateDraftValue(next)
+          }}
+          className="w-36 rounded border border-zinc-300 bg-white px-2 py-1 text-right font-medium tabular-nums text-zinc-900 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:ring-zinc-800"
+        />
+      ) : editing ? (
+        <input
+          autoFocus
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={() => void commitSingleEdit()}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault()
+              void commitSingleEdit()
+            }
+            if (event.key === 'Escape') {
+              event.preventDefault()
+              setDraft(formatCurrency(value))
+              setEditing(false)
+            }
+          }}
+          className="w-36 rounded border border-zinc-300 bg-white px-2 py-1 text-right font-medium tabular-nums text-zinc-900 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:ring-zinc-800"
+        />
+      ) : (
+        <button type="button" onClick={() => setEditing(true)} className="text-right font-medium tabular-nums text-zinc-800 dark:text-zinc-100">
+          {formatCurrency(value)}
+        </button>
+      )}
     </div>
   )
 }
@@ -1683,10 +1961,13 @@ function Readout({ label, value, strong = false, onExplain }: { label: string; v
   )
 }
 
-function QuickMetric({ label, value, accent = 'text-zinc-900 dark:text-zinc-100' }: { label: string; value: string; accent?: string }) {
+function QuickMetric({ label, value, accent = 'text-zinc-900 dark:text-zinc-100', aidFilters }: { label: string; value: string; accent?: string; aidFilters?: Set<BudgetAidFilter> }) {
   return (
     <div className="rounded-lg bg-zinc-50 px-3 py-2 dark:bg-zinc-950">
-      <div className="text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-500">{label}</div>
+      <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-500">
+        {label}
+        {aidFilters ? <BudgetAidIndicators filters={aidFilters} /> : null}
+      </div>
       <div className={`mt-1 text-lg font-semibold ${accent}`}>{value}</div>
     </div>
   )
@@ -1698,19 +1979,6 @@ function StatCard({ label, value, accent = 'text-zinc-900 dark:text-zinc-100' }:
       <div className="text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400">{label}</div>
       <div className={`mt-2 text-2xl font-semibold ${accent}`}>{value}</div>
     </div>
-  )
-}
-
-function SummaryRow({ label, values, accent, variance = false }: { label: string; values: number[]; accent?: string; variance?: boolean }) {
-  return (
-    <tr className="border-b border-zinc-100 last:border-b-0 dark:border-zinc-800">
-      <td className="px-4 py-3 font-medium text-zinc-900 dark:text-zinc-100">{label}</td>
-      {values.map((value, index) => (
-        <td key={`${label}-${MONTH_LABELS[index]}`} className={`px-4 py-3 text-right ${variance ? value >= 0 ? 'text-emerald-700 dark:text-emerald-300' : 'text-red-700 dark:text-red-300' : accent ?? 'text-zinc-700 dark:text-zinc-200'}`}>
-          {formatCurrency(value)}
-        </td>
-      ))}
-    </tr>
   )
 }
 

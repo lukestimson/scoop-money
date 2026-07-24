@@ -6,8 +6,10 @@ import { parseLocalDateToUnix } from '../../../types/dateParsing'
 import { useAppContext } from '../context/AppContext'
 import { useDateFormat } from '../context/DateFormatContext'
 import { formatCurrency, parseCurrencyInput } from '../lib/currency'
-import { getStoredBudgetType } from '../lib/budget'
+import { netSpendByCategory, netSpendCents } from '../lib/spending'
+import { getStoredBudgetType, loadStoredBudgetAidFilters, saveStoredBudgetAidFilters, subscribeBudgetAidFilters, type BudgetAidFilter } from '../lib/budget'
 import { BUDGET_CATEGORY_ORDER } from '../../../types/budgetCategories'
+import { GovAidIcon } from './BudgetAidIndicators'
 import { ChatBox } from './ChatBox'
 import { ListSectionSearchBar, type ListSearchPhase } from './ListSectionSearchBar'
 
@@ -21,11 +23,14 @@ interface UndoAction {
   flaggedIds?: number[]
 }
 
-const ACCOUNT_NAMES = ['Capital One', 'Venmo', 'EBT', 'Chase'] as const
 const IMPORT_COLLAPSED_KEY = 'scoop_import_collapsed'
-const PERIOD_KEY = 'scoop_txn_period'
+const IMPORT_HELP_AUTO_CLOSE_MS = 10 * 60 * 1000
 const SORT_KEY = 'scoop_txn_sort'
-const ANCHOR_KEY = 'scoop_txn_anchor'
+const IMPORT_HELP_POINTS = [
+  'Capital One: Statements & Docs -> Download Transactions -> CSV -> Select Custom Date Range',
+  'Venmo: Statements -> Select Month -> Download CSV',
+  'EBT: EBT Edge Mobile App -> Transactions -> Screenshot Transaction History'
+] as const
 
 /** Same keys as Budget.tsx — read when building category pickers so Transactions stays in sync. */
 const BUDGET_CUSTOM_CATEGORIES_KEY = 'scoop_budget_custom_categories'
@@ -141,36 +146,69 @@ function formatAnchor(anchor: Date, period: DisplayPeriod): string {
   return format(anchor, 'MMM yyyy')
 }
 
-function getStoredPeriod(): DisplayPeriod {
-  const v = localStorage.getItem(PERIOD_KEY)
-  if (v === 'week' || v === 'month' || v === 'year') return v
-  return 'month'
-}
-
 function getStoredSort(): SortKey {
   const v = localStorage.getItem(SORT_KEY)
   if (v === 'date' || v === 'amount' || v === 'category' || v === 'recent') return v
   return 'date'
 }
 
-function getStoredAnchor(): Date {
-  const v = localStorage.getItem(ANCHOR_KEY)
-  if (v) { const d = new Date(v); if (!isNaN(d.getTime())) return d }
-  return new Date()
+function isEbtAccount(account: Account | undefined): boolean {
+  if (!account) return false
+  return account.type === 'ebt' || account.name.toLowerCase().includes('ebt')
+}
+
+function isEbtTransaction(tx: Transaction, accountsById: Map<number, Account>): boolean {
+  return tx.account_id != null && isEbtAccount(accountsById.get(tx.account_id))
+}
+
+function randomAccountColorHex(): string {
+  const hue = Math.floor(Math.random() * 360)
+  return hslToHex(hue, 70, 55)
+}
+
+function hslToHex(h: number, s: number, l: number): string {
+  const sat = s / 100
+  const light = l / 100
+  const c = (1 - Math.abs(2 * light - 1)) * sat
+  const x = c * (1 - Math.abs((h / 60) % 2 - 1))
+  const m = light - c / 2
+  let r = 0
+  let g = 0
+  let b = 0
+  if (h < 60) {
+    r = c
+    g = x
+  } else if (h < 120) {
+    r = x
+    g = c
+  } else if (h < 180) {
+    g = c
+    b = x
+  } else if (h < 240) {
+    g = x
+    b = c
+  } else if (h < 300) {
+    r = x
+    b = c
+  } else {
+    r = c
+    b = x
+  }
+  const toHex = (v: number): string => Math.round((v + m) * 255).toString(16).padStart(2, '0')
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`
 }
 
 export function Transactions() {
-  const { dataVersion, bumpDataVersion } = useAppContext()
+  const { dataVersion, bumpDataVersion, anchor, setAnchor, period, setPeriod } = useAppContext()
   const { formatDate } = useDateFormat()
   const [transactions, setTransactions] = useState<Transaction[]>([])
   const [accounts, setAccounts] = useState<Account[]>([])
   const [importedFiles, setImportedFiles] = useState<ImportedFileRecord[]>([])
   const [budgetLineItems, setBudgetLineItems] = useState<BudgetLineItem[]>([])
   const [budgetSheetItems, setBudgetSheetItems] = useState<BudgetItem[]>([])
+  const [aidFilters, setAidFilters] = useState<Set<BudgetAidFilter>>(() => loadStoredBudgetAidFilters())
   const [selectedAccountIds, setSelectedAccountIds] = useState<number[]>([])
   const [selectedCategories, setSelectedCategories] = useState<string[]>([])
-  const [anchor, setAnchor] = useState(() => getStoredAnchor())
-  const [period, setPeriod] = useState<DisplayPeriod>(() => getStoredPeriod())
   const [sortKey, setSortKey] = useState<SortKey>(() => getStoredSort())
   const [sortOpen, setSortOpen] = useState(false)
   const [calendarOpen, setCalendarOpen] = useState(false)
@@ -181,6 +219,7 @@ export function Transactions() {
   const [deleteAllArmed, setDeleteAllArmed] = useState(false)
   const [error, setError] = useState('')
   const [importCollapsed, setImportCollapsed] = useState(() => localStorage.getItem(IMPORT_COLLAPSED_KEY) === 'true')
+  const [importHelpOpen, setImportHelpOpen] = useState(false)
   const [hasUndoActions, setHasUndoActions] = useState(false)
   const [txnSearchFieldOpen, setTxnSearchFieldOpen] = useState(false)
   const [txnSearchQuery, setTxnSearchQuery] = useState('')
@@ -191,6 +230,7 @@ export function Transactions() {
   const calendarRef = useRef<HTMLDivElement>(null)
 
   const { start, end } = periodBounds(anchor, period)
+  const govAidActive = aidFilters.has('government')
   const monthBoundsForImport = useMemo(() => {
     const s = startOfMonth(anchor)
     const e = endOfMonth(anchor)
@@ -198,9 +238,20 @@ export function Transactions() {
   }, [anchor])
 
   useEffect(() => { localStorage.setItem(IMPORT_COLLAPSED_KEY, String(importCollapsed)) }, [importCollapsed])
-  useEffect(() => { localStorage.setItem(PERIOD_KEY, period) }, [period])
   useEffect(() => { localStorage.setItem(SORT_KEY, sortKey) }, [sortKey])
-  useEffect(() => { localStorage.setItem(ANCHOR_KEY, anchor.toISOString()) }, [anchor])
+  useEffect(() => {
+    if (!importHelpOpen) return
+    const timer = window.setTimeout(() => setImportHelpOpen(false), IMPORT_HELP_AUTO_CLOSE_MS)
+    return () => window.clearTimeout(timer)
+  }, [importHelpOpen])
+  useEffect(() => {
+    if (!importHelpOpen) return
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setImportHelpOpen(false)
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [importHelpOpen])
 
   useEffect(() => {
     if (!sortOpen) return
@@ -254,6 +305,24 @@ export function Transactions() {
     })
   }, [dataVersion, monthBoundsForImport.end, monthBoundsForImport.start])
 
+  useEffect(() => {
+    return subscribeBudgetAidFilters(() => setAidFilters(loadStoredBudgetAidFilters()))
+  }, [])
+
+  const accountsById = useMemo(() => {
+    const map = new Map<number, Account>()
+    for (const account of accounts) map.set(account.id, account)
+    return map
+  }, [accounts])
+
+  function toggleGovAid(): void {
+    const next = new Set(aidFilters)
+    if (next.has('government')) next.delete('government')
+    else next.add('government')
+    setAidFilters(next)
+    saveStoredBudgetAidFilters(next)
+  }
+
   const categories = useMemo(
     () => buildTransactionCategoryOptions(transactions, budgetLineItems, budgetSheetItems),
     [transactions, budgetLineItems, budgetSheetItems]
@@ -271,16 +340,14 @@ export function Transactions() {
   )
 
   const categorySpendRank = useMemo(() => {
-    const totals = new Map<string, number>()
-    for (const tx of visibleTransactions) {
-      const cat = tx.mapped_category || 'Uncategorized'
-      totals.set(cat, (totals.get(cat) ?? 0) + Math.abs(tx.amount))
-    }
+    const totals = netSpendByCategory(
+      visibleTransactions.filter((tx) => !(govAidActive && isEbtTransaction(tx, accountsById)))
+    )
     const sorted = [...totals.entries()].sort((a, b) => b[1] - a[1])
     const rank = new Map<string, number>()
     sorted.forEach(([cat], i) => rank.set(cat, i))
     return rank
-  }, [visibleTransactions])
+  }, [accountsById, govAidActive, visibleTransactions])
 
   const sortedTransactions = useMemo(() => {
     const list = [...visibleTransactions]
@@ -345,8 +412,11 @@ export function Transactions() {
   )
 
   const totalSpent = useMemo(
-    () => visibleTransactions.reduce((sum, tx) => sum - tx.amount, 0),
-    [visibleTransactions]
+    () =>
+      netSpendCents(
+        visibleTransactions.filter((tx) => !(govAidActive && isEbtTransaction(tx, accountsById)))
+      ),
+    [accountsById, govAidActive, visibleTransactions]
   )
 
   function pushUndo(action: UndoAction): void {
@@ -493,7 +563,10 @@ export function Transactions() {
           <div>
             <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">Transactions</h1>
             <div className="mt-2 text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400">Total Spent</div>
-            <div className="mt-1 text-2xl font-semibold tracking-tight text-zinc-900 tabular-nums dark:text-zinc-100">{formatCurrency(totalSpent)}</div>
+            <div className="mt-1 flex items-center gap-2 text-2xl font-semibold tracking-tight text-zinc-900 tabular-nums dark:text-zinc-100">
+              {formatCurrency(totalSpent)}
+              {govAidActive ? <GovAidIcon /> : null}
+            </div>
           </div>
           <div className="flex flex-col items-end gap-2">
             <div className="flex flex-wrap items-center gap-3">
@@ -532,6 +605,22 @@ export function Transactions() {
                 <CalendarDropdown period={period} anchor={anchor} onSelect={(d) => { setAnchor(d); setCalendarOpen(false) }} />
               )}
             </div>
+            <div className="inline-flex rounded-full bg-zinc-100 p-0.5 dark:bg-zinc-800" role="group" aria-label="Aid filters">
+              <button
+                type="button"
+                aria-pressed={govAidActive}
+                aria-label="Toggle government aid"
+                title="Government aid"
+                onClick={toggleGovAid}
+                className={`flex h-7 min-w-7 items-center justify-center rounded-full px-2 text-xs font-medium transition-colors ${
+                  govAidActive
+                    ? 'bg-amber-100 text-amber-900 shadow-sm dark:bg-amber-950/60 dark:text-amber-100'
+                    : 'text-zinc-500 dark:text-zinc-400'
+                }`}
+              >
+                <GovAidIcon />
+              </button>
+            </div>
           </div>
         </div>
 
@@ -539,14 +628,50 @@ export function Transactions() {
         <div className="relative z-20 mb-5 rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-700 dark:bg-zinc-900" style={{ overflow: 'visible' }}>
           <div className="flex items-center justify-between px-3 py-2.5">
             <span className="text-[12px] font-semibold text-zinc-900 dark:text-zinc-100">Import Transactions</span>
-            <span className="text-[11px] font-medium tabular-nums text-zinc-500 dark:text-zinc-400">{importedFiles.length} file{importedFiles.length !== 1 ? 's' : ''} imported</span>
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] font-medium tabular-nums text-zinc-500 dark:text-zinc-400">{importedFiles.length} file{importedFiles.length !== 1 ? 's' : ''} imported</span>
+              <button
+                type="button"
+                onClick={() => setImportHelpOpen((value) => !value)}
+                className={`inline-flex h-5 w-5 items-center justify-center rounded-full border transition-colors ${
+                  importHelpOpen
+                    ? 'border-red-200 text-red-500 hover:border-red-300 hover:text-red-600 dark:border-red-900 dark:text-red-400 dark:hover:border-red-800 dark:hover:text-red-300'
+                    : 'border-zinc-200 text-zinc-400 hover:border-zinc-300 hover:text-zinc-700 dark:border-zinc-700 dark:text-zinc-500 dark:hover:border-zinc-600 dark:hover:text-zinc-200'
+                }`}
+                aria-label={importHelpOpen ? 'Close import help' : 'Import help'}
+              >
+                {importHelpOpen ? <XIcon /> : <QuestionMarkIcon />}
+              </button>
+            </div>
           </div>
           {!importCollapsed && (
             <div className="border-t border-zinc-100 px-3 py-3 dark:border-zinc-800">
               <div className="flex items-start gap-4">
-                <button type="button" onClick={() => inputRef.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); const file = e.dataTransfer.files[0]; if (file) void importFile(file) }} className="flex min-h-[62px] w-[260px] shrink-0 items-center justify-center rounded-lg border border-dashed border-zinc-300 bg-zinc-50 px-4 text-[12px] font-medium text-zinc-500 transition-colors hover:border-zinc-400 hover:bg-white hover:text-zinc-700 dark:border-zinc-700 dark:bg-zinc-950/50 dark:text-zinc-400 dark:hover:border-zinc-600 dark:hover:bg-zinc-900 dark:hover:text-zinc-200">
-                  Drop CSV or Excel here
-                </button>
+                {importHelpOpen ? (
+                  <div className="flex min-h-[62px] w-[560px] shrink-0 flex-col justify-between rounded-lg border border-zinc-200 bg-zinc-50/80 px-4 py-3 dark:border-zinc-700 dark:bg-zinc-950/50">
+                    <ul className="space-y-1.5 text-[11px] leading-4 text-zinc-600 dark:text-zinc-300">
+                      {IMPORT_HELP_POINTS.map((point) => (
+                        <li key={point} className="flex items-start gap-2 whitespace-nowrap">
+                          <span className="mt-[3px] h-1 w-1 shrink-0 rounded-full bg-zinc-400 dark:bg-zinc-500" />
+                          <span>{point.replaceAll('->', '→')}</span>
+                        </li>
+                      ))}
+                    </ul>
+                    <div className="mt-2 flex justify-end">
+                      <button
+                        type="button"
+                        onClick={() => setImportHelpOpen(false)}
+                        className="rounded-full border border-zinc-200 px-2 py-1 text-[10px] font-medium uppercase tracking-[0.08em] text-zinc-500 transition-colors hover:border-zinc-300 hover:text-zinc-700 dark:border-zinc-700 dark:text-zinc-400 dark:hover:border-zinc-600 dark:hover:text-zinc-200"
+                      >
+                        Minimize
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button type="button" onClick={() => inputRef.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); const file = e.dataTransfer.files[0]; if (file) void importFile(file) }} className="flex min-h-[62px] w-[260px] shrink-0 items-center justify-center rounded-lg border border-dashed border-zinc-300 bg-zinc-50 px-4 text-[12px] font-medium text-zinc-500 transition-colors hover:border-zinc-400 hover:bg-white hover:text-zinc-700 dark:border-zinc-700 dark:bg-zinc-950/50 dark:text-zinc-400 dark:hover:border-zinc-600 dark:hover:bg-zinc-900 dark:hover:text-zinc-200">
+                    Drop CSV or Excel here
+                  </button>
+                )}
                 <div className="min-w-0 flex-1">
                   {importedFiles.length === 0 ? (
                     <span className="block text-right text-[12px] text-zinc-500 dark:text-zinc-400">No files for this month</span>
@@ -580,10 +705,9 @@ export function Transactions() {
         )}
 
         {/* Grid: filter rail + transactions list */}
-        <div className="md:grid md:grid-cols-[auto_minmax(0,1fr)] md:items-stretch md:gap-x-4">
-          {/* Left filter rail — stretch to match transactions card height */}
-          <div className="mb-4 flex min-h-0 w-full flex-col md:col-start-1 md:row-start-1 md:mb-0 md:h-full">
-            <div className="sticky top-6 flex min-h-0 w-full flex-1 flex-col md:w-[7.5rem]">
+        <div className="md:grid md:grid-cols-[auto_minmax(0,1fr)] md:items-start md:gap-x-4">
+          <div className="mb-4 w-full md:col-start-1 md:row-start-1 md:mb-0 md:self-start">
+            <div className="sticky top-6 w-full md:w-[7.5rem]">
               <TransactionsFilterRail
                 accounts={accounts} categories={categories} selectedAccountIds={selectedAccountIds} selectedCategories={selectedCategories}
                 onToggleAccount={toggleAccount} onToggleCategory={toggleCategory} onClearAccounts={() => setSelectedAccountIds([])} onClearCategories={() => setSelectedCategories([])}
@@ -647,7 +771,7 @@ export function Transactions() {
                 <div className="text-right">Amount</div>
                 <div aria-hidden="true" />
               </div>
-              {adding ? <AddTransactionRow accounts={accounts} categories={categories} onDone={handleAddDone} /> : null}
+              {adding ? <AddTransactionRow accounts={accounts} categories={categories} anchor={anchor} onDone={handleAddDone} /> : null}
               {sortedTransactions.length === 0 && !adding ? (
                 <div className="px-4 py-10 text-center text-sm text-zinc-500 dark:text-zinc-400">No transactions for this period</div>
               ) : sortedTransactions.length > 0 && txnSearchFiltered.length === 0 ? (
@@ -660,6 +784,7 @@ export function Transactions() {
                     accounts={accounts}
                     categories={categories}
                     editMode={editMode}
+                    govExcluded={govAidActive && isEbtTransaction(tx, accountsById)}
                     onChanged={bumpDataVersion}
                     onDelete={() => deleteTransaction(tx.id)}
                     onContextMenu={(e) => { e.preventDefault(); setContextMenu({ txId: tx.id, x: e.clientX, y: e.clientY }) }}
@@ -773,6 +898,67 @@ function MonthPicker({ anchor, onSelect }: { anchor: Date; onSelect: (d: Date) =
   )
 }
 
+function MonthDayPicker({ anchor, selected, onSelect }: { anchor: Date; selected: Date; onSelect: (d: Date) => void }) {
+  const [viewMonth, setViewMonth] = useState(() => startOfMonth(anchor))
+  const selectedDay = selected.getDate()
+  const selectedMonth = selected.getMonth()
+  const selectedYear = selected.getFullYear()
+
+  const daysInMonth = getDaysInMonth(viewMonth)
+  const firstDayOfMonth = getDay(viewMonth)
+  const startOffset = (firstDayOfMonth + 6) % 7
+
+  const cells: Array<{ date: Date; inMonth: boolean }> = []
+  for (let i = 0; i < startOffset; i++) {
+    const d = new Date(viewMonth.getFullYear(), viewMonth.getMonth(), 1 - startOffset + i)
+    cells.push({ date: d, inMonth: false })
+  }
+  for (let d = 1; d <= daysInMonth; d++) {
+    cells.push({ date: new Date(viewMonth.getFullYear(), viewMonth.getMonth(), d), inMonth: true })
+  }
+  while (cells.length % 7 !== 0) {
+    const last = cells[cells.length - 1].date
+    cells.push({ date: new Date(last.getFullYear(), last.getMonth(), last.getDate() + 1), inMonth: false })
+  }
+
+  return (
+    <div className="absolute left-0 top-full z-40 mt-1 w-[240px] rounded-lg border border-zinc-200/80 bg-white p-2 shadow-[0_4px_12px_rgba(0,0,0,0.12)] dark:border-zinc-600 dark:bg-zinc-900">
+      <div className="mb-2 flex items-center justify-between">
+        <button type="button" onClick={() => setViewMonth((m) => addMonths(m, -1))} className="px-1.5 py-0.5 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"><span className="inline-block -rotate-90"><SmallChevron /></span></button>
+        <span className="text-[12px] font-semibold text-zinc-800 dark:text-zinc-200">{format(viewMonth, 'MMMM yyyy')}</span>
+        <button type="button" onClick={() => setViewMonth((m) => addMonths(m, 1))} className="px-1.5 py-0.5 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"><span className="inline-block rotate-90"><SmallChevron /></span></button>
+      </div>
+      <div className="mb-1 grid grid-cols-7 gap-0">
+        {WEEKDAY_LABELS.map((d) => <div key={d} className="py-0.5 text-center text-[9px] font-medium text-zinc-400 dark:text-zinc-500">{d}</div>)}
+      </div>
+      <div className="grid grid-cols-7 gap-0.5">
+        {cells.map((cell, idx) => {
+          const isSelected =
+            cell.date.getDate() === selectedDay &&
+            cell.date.getMonth() === selectedMonth &&
+            cell.date.getFullYear() === selectedYear
+          return (
+            <button
+              key={`${cell.date.toISOString()}-${idx}`}
+              type="button"
+              onClick={() => onSelect(cell.date)}
+              className={`rounded-md py-1.5 text-center text-[11px] transition-colors ${
+                isSelected
+                  ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950'
+                  : cell.inMonth
+                    ? 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-950'
+                    : 'text-zinc-300 hover:bg-zinc-50 dark:text-zinc-600 dark:hover:bg-zinc-950'
+              }`}
+            >
+              {cell.date.getDate()}
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 function WeekPicker({ anchor, onSelect }: { anchor: Date; onSelect: (d: Date) => void }) {
   const [viewMonth, setViewMonth] = useState(() => startOfMonth(anchor))
   const selectedWeekStart = startOfWeek(anchor, { weekStartsOn: 1 })
@@ -830,6 +1016,15 @@ function SmallChevron() {
   return (<svg width="10" height="10" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M5 12.5 L10 7.5 L15 12.5" /></svg>)
 }
 
+function QuestionMarkIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M7.8 7.1a2.5 2.5 0 0 1 4.4 1.6c0 1.9-2.2 2.2-2.2 3.8" />
+      <circle cx="10" cy="14.8" r="0.85" fill="currentColor" stroke="none" />
+    </svg>
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Left filter rail (matches Budget page style)
 // ---------------------------------------------------------------------------
@@ -840,23 +1035,13 @@ function TransactionsFilterRail({
   accounts: Account[]; categories: string[]; selectedAccountIds: number[]; selectedCategories: string[]
   onToggleAccount: (id: number) => void; onToggleCategory: (category: string) => void; onClearAccounts: () => void; onClearCategories: () => void
 }) {
-  const accountsForDisplay = useMemo(() => {
-    const mapped: Array<{ id: number; name: string }> = []
-    for (const name of ACCOUNT_NAMES) {
-      const match = accounts.find((a) => a.name.toLowerCase().includes(name.toLowerCase()))
-      if (match) mapped.push({ id: match.id, name })
-      else mapped.push({ id: -(mapped.length + 1), name })
-    }
-    return mapped
-  }, [accounts])
-
   return (
-    <div className="flex h-full min-h-0 w-full flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
+    <div className="flex w-full flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
       <div className="shrink-0 border-b border-zinc-100 bg-zinc-50/80 px-2.5 py-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950/50 dark:text-zinc-400">Filters</div>
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 py-1.5">
+      <div className="px-2 py-1.5">
         <FilterGroup ariaLabel="Accounts" hasSelection={selectedAccountIds.length > 0} onClear={onClearAccounts}>
-          {accountsForDisplay.map((a) => (
-            <FilterPill key={a.id} label={a.name} active={selectedAccountIds.includes(a.id)} tone="sky" onClick={() => { if (a.id > 0) onToggleAccount(a.id) }} />
+          {accounts.map((a) => (
+            <AccountFilterPill key={a.id} label={a.name} color={a.color} active={selectedAccountIds.includes(a.id)} onClick={() => onToggleAccount(a.id)} />
           ))}
         </FilterGroup>
         {categories.length > 0 && (
@@ -868,6 +1053,22 @@ function TransactionsFilterRail({
         )}
       </div>
     </div>
+  )
+}
+
+function AccountFilterPill({ label, color, active, onClick }: { label: string; color: string; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      className={`w-full rounded-md px-2 py-1 text-left text-[11px] font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-300 ${
+        active ? 'ring-1 ring-inset' : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200'
+      }`}
+      style={active ? { color, backgroundColor: `${color}22`, boxShadow: `inset 0 0 0 1px ${color}66` } : undefined}
+    >
+      {label}
+    </button>
   )
 }
 
@@ -971,8 +1172,8 @@ function formatImportSpan(file: ImportedFileRecord, formatDate: (unix: number) =
 
 type TxEditField = 'date' | 'description' | 'category' | 'account' | 'amount' | null
 
-function TransactionRow({ transaction, accounts, categories, editMode, onChanged, onDelete, onContextMenu }: {
-  transaction: Transaction; accounts: Account[]; categories: string[]; editMode: boolean;
+function TransactionRow({ transaction, accounts, categories, editMode, govExcluded, onChanged, onDelete, onContextMenu }: {
+  transaction: Transaction; accounts: Account[]; categories: string[]; editMode: boolean; govExcluded: boolean;
   onChanged: () => void; onDelete: () => Promise<void>; onContextMenu: (e: React.MouseEvent) => void
 }) {
   const [activeField, setActiveField] = useState<TxEditField>(null)
@@ -1089,7 +1290,13 @@ function TransactionRow({ transaction, accounts, categories, editMode, onChanged
   }
 
   return (
-    <div ref={rowRef} className="group/row grid grid-cols-[90px_1fr_130px_80px_100px_48px] items-center gap-2 border-b border-zinc-100 px-4 py-2.5 text-sm last:border-b-0 dark:border-zinc-800" onContextMenu={onContextMenu}>
+    <div
+      ref={rowRef}
+      className={`group/row grid grid-cols-[90px_1fr_130px_80px_100px_48px] items-center gap-2 border-b border-zinc-100 px-4 py-2.5 text-sm last:border-b-0 dark:border-zinc-800 ${
+        govExcluded ? 'rounded-md opacity-50 ring-1 ring-inset ring-amber-700/50 dark:ring-amber-500/50' : ''
+      }`}
+      onContextMenu={onContextMenu}
+    >
       {/* Date */}
       {activeField === 'date' ? (
         <input autoFocus value={dateDraft} onChange={(e) => setDateDraft(e.target.value)} onKeyDown={handleKeyDown} className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-sm tabular-nums text-zinc-900 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:ring-zinc-800" />
@@ -1122,9 +1329,22 @@ function TransactionRow({ transaction, accounts, categories, editMode, onChanged
 
       {/* Account */}
       {activeField === 'account' ? (
-        <InlineEditAccountDropdown value={accountDraft} accounts={accounts} onChange={setAccountDraft} onCommittedPick={(id) => void pickAccountAndFinish(id)} />
+        <InlineEditAccountDropdown
+          value={accountDraft}
+          accounts={accounts}
+          onChange={setAccountDraft}
+          onCommittedPick={(id) => void pickAccountAndFinish(id)}
+          onAccountsChanged={onChanged}
+        />
       ) : (
-        <button type="button" onClick={() => setActiveField('account')} className="flex h-7 min-w-0 items-center truncate text-left text-[11px] text-zinc-400 dark:text-zinc-500">{accountName || '—'}</button>
+        <button
+          type="button"
+          onClick={() => setActiveField('account')}
+          className="flex h-7 min-w-0 items-center truncate rounded px-1 text-left text-[11px]"
+          style={transaction.account_id ? { color: accounts.find((a) => a.id === transaction.account_id)?.color } : undefined}
+        >
+          {accountName || '—'}
+        </button>
       )}
 
       {/* Amount */}
@@ -1161,10 +1381,12 @@ function parseTransactionDateInput(value: string, fallback: number): number {
 // Inline account dropdown (replaces native select)
 // ---------------------------------------------------------------------------
 
-function InlineEditAccountDropdown({ value, accounts, onChange, onCommittedPick }: {
-  value: number | null; accounts: Account[]; onChange: (id: number | null) => void; onCommittedPick?: (id: number | null) => void
+function InlineEditAccountDropdown({ value, accounts, onChange, onCommittedPick, onAccountsChanged }: {
+  value: number | null; accounts: Account[]; onChange: (id: number | null) => void; onCommittedPick?: (id: number | null) => void; onAccountsChanged?: () => void
 }) {
   const [open, setOpen] = useState(true)
+  const [editingId, setEditingId] = useState<number | null>(null)
+  const [nameDraft, setNameDraft] = useState('')
   const ref = useRef<HTMLDivElement>(null)
   const selected = accounts.find((a) => a.id === value)
 
@@ -1179,16 +1401,97 @@ function InlineEditAccountDropdown({ value, accounts, onChange, onCommittedPick 
 
   return (
     <div ref={ref} className="relative min-w-0">
-      <button type="button" onClick={() => setOpen((v) => !v)} className="w-full min-w-0 truncate rounded bg-zinc-50 px-1.5 py-0.5 text-left text-[11px] ring-1 ring-zinc-200 dark:bg-zinc-800 dark:ring-zinc-700">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full min-w-0 truncate rounded px-1.5 py-0.5 text-left text-[11px] ring-1 dark:ring-zinc-700"
+        style={selected ? { color: selected.color, backgroundColor: `${selected.color}1f`, boxShadow: `inset 0 0 0 1px ${selected.color}55` } : undefined}
+      >
         {selected?.name || '—'}
       </button>
       {open && (
         <div className="absolute left-0 top-full z-40 mt-1 min-w-[120px] overflow-hidden rounded-lg border border-zinc-200 bg-white p-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
           <button type="button" onMouseDown={(e) => { e.preventDefault(); onChange(null); onCommittedPick?.(null); setOpen(false) }} className="flex w-full rounded-md px-2.5 py-1.5 text-left text-[11px] font-medium text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-950">—</button>
+          <button
+            type="button"
+            onMouseDown={(e) => {
+              e.preventDefault()
+              void (async () => {
+                const created = await window.api.createAccount({ name: 'New Account', type: 'chase', color: randomAccountColorHex() })
+                onChange(created.id)
+                onCommittedPick?.(created.id)
+                onAccountsChanged?.()
+                setOpen(true)
+              })()
+            }}
+            className="mb-1 flex w-full rounded-md px-2.5 py-1.5 text-left text-[11px] font-semibold text-zinc-700 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-800"
+          >
+            + Add Account
+          </button>
           {accounts.map((a) => (
-            <button key={a.id} type="button" onMouseDown={(e) => { e.preventDefault(); onChange(a.id); onCommittedPick?.(a.id); setOpen(false) }} className={`flex w-full rounded-md px-2.5 py-1.5 text-left text-[11px] font-medium transition-colors ${a.id === value ? 'bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100' : 'text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-950'}`}>
-              {a.name}
-            </button>
+            <div key={a.id} className={`rounded-md ${a.id === value ? 'bg-zinc-100 dark:bg-zinc-800' : ''}`}>
+              <div className="flex items-center gap-1 px-1.5 py-1">
+                <button
+                  type="button"
+                  onMouseDown={(e) => { e.preventDefault(); onChange(a.id); onCommittedPick?.(a.id); setOpen(false) }}
+                  className="flex min-w-0 flex-1 items-center gap-1.5 rounded px-1 py-0.5 text-left text-[11px] font-medium hover:bg-zinc-50 dark:hover:bg-zinc-950"
+                  style={{ color: a.color }}
+                >
+                  <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: a.color }} />
+                  <span className="truncate">{a.name}</span>
+                </button>
+                <button type="button" onMouseDown={(e) => { e.preventDefault(); setEditingId(a.id); setNameDraft(a.name) }} className="rounded px-1 text-[10px] text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200">Edit</button>
+                <input
+                  type="color"
+                  value={a.color}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onChange={(e) => { void (async () => { await window.api.updateAccount(a.id, { color: e.target.value }); onAccountsChanged?.() })() }}
+                  className="h-4 w-4 cursor-pointer bg-transparent p-0"
+                />
+                <button
+                  type="button"
+                  onMouseDown={(e) => {
+                    e.preventDefault()
+                    void (async () => {
+                      if (accounts.length <= 1) return
+                      await window.api.deleteAccount(a.id)
+                      if (value === a.id) { onChange(null); onCommittedPick?.(null) }
+                      onAccountsChanged?.()
+                    })()
+                  }}
+                  className="rounded px-1 text-[10px] text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30"
+                >
+                  Del
+                </button>
+              </div>
+              {editingId === a.id ? (
+                <div className="px-2 pb-1">
+                  <input
+                    autoFocus
+                    value={nameDraft}
+                    onChange={(e) => setNameDraft(e.target.value)}
+                    onBlur={() => {
+                      void (async () => {
+                        const name = nameDraft.trim()
+                        if (name.length > 0) await window.api.updateAccount(a.id, { name })
+                        setEditingId(null)
+                        onAccountsChanged?.()
+                      })()
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault()
+                        ;(e.currentTarget as HTMLInputElement).blur()
+                      } else if (e.key === 'Escape') {
+                        e.preventDefault()
+                        setEditingId(null)
+                      }
+                    }}
+                    className="h-6 w-full rounded border border-zinc-200 bg-white px-1.5 text-[11px] outline-none focus:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-950"
+                  />
+                </div>
+              ) : null}
+            </div>
           ))}
         </div>
       )}
@@ -1349,22 +1652,33 @@ function InlineEditCategoryInput({
 // Add transaction row with category dropdown
 // ---------------------------------------------------------------------------
 
-function AddTransactionRow({ accounts, categories, onDone }: { accounts: Account[]; categories: string[]; onDone: (created: boolean) => void }) {
+function AddTransactionRow({ accounts, categories, anchor, onDone }: { accounts: Account[]; categories: string[]; anchor: Date; onDone: (created: boolean) => void }) {
   const [description, setDescription] = useState('')
   const [amount, setAmount] = useState('')
   const [category, setCategory] = useState('')
+  const [accountId, setAccountId] = useState<number | null>(accounts[0]?.id ?? null)
+  const [dateValue, setDateValue] = useState<Date>(anchor)
   const [showDropdown, setShowDropdown] = useState(false)
+  const [showAccountDropdown, setShowAccountDropdown] = useState(false)
+  const [showDatePicker, setShowDatePicker] = useState(false)
   const [highlightIdx, setHighlightIdx] = useState(0)
   const catInputRef = useRef<HTMLInputElement>(null)
   const dropdownRef = useRef<HTMLDivElement>(null)
+  const accountRef = useRef<HTMLDivElement>(null)
+  const dateRef = useRef<HTMLDivElement>(null)
 
   const filteredCategories = useMemo(() => {
     if (!category.trim()) return categories
     const lower = category.toLowerCase()
     return categories.filter((c) => c.toLowerCase().includes(lower))
   }, [categories, category])
+  const selectedAccount = accounts.find((a) => a.id === accountId) ?? null
 
   useEffect(() => { setHighlightIdx(0) }, [filteredCategories])
+
+  useEffect(() => {
+    if (!accountId && accounts[0]) setAccountId(accounts[0].id)
+  }, [accountId, accounts])
 
   useEffect(() => {
     if (!showDropdown || !dropdownRef.current) return
@@ -1372,15 +1686,51 @@ function AddTransactionRow({ accounts, categories, onDone }: { accounts: Account
     el?.scrollIntoView({ block: 'nearest' })
   }, [highlightIdx, showDropdown])
 
+  useEffect(() => {
+    if (!showAccountDropdown) return
+    const close = (e: MouseEvent) => {
+      if (accountRef.current && !accountRef.current.contains(e.target as Node)) setShowAccountDropdown(false)
+    }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setShowAccountDropdown(false) }
+    document.addEventListener('pointerdown', close)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('pointerdown', close)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [showAccountDropdown])
+
+  useEffect(() => {
+    if (!showDatePicker) return
+    const close = (e: MouseEvent) => {
+      if (dateRef.current && !dateRef.current.contains(e.target as Node)) setShowDatePicker(false)
+    }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setShowDatePicker(false) }
+    document.addEventListener('pointerdown', close)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('pointerdown', close)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [showDatePicker])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onDone(false)
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [onDone])
+
   async function create(): Promise<void> {
     if (!description.trim() && !amount.trim()) { onDone(false); return }
     await window.api.createTransaction({
-      date: Math.floor(Date.now() / 1000),
+      date: Math.floor(new Date(dateValue.getFullYear(), dateValue.getMonth(), dateValue.getDate(), 12, 0, 0, 0).getTime() / 1000),
       description,
       amount: parseCurrencyInput(amount),
       mapped_category: category || 'Uncategorized',
       raw_category: category || 'Uncategorized',
-      account_id: accounts[0]?.id ?? null,
+      account_id: accountId,
       source: 'manual'
     })
     onDone(true)
@@ -1405,7 +1755,25 @@ function AddTransactionRow({ accounts, categories, onDone }: { accounts: Account
 
   return (
     <div className="relative grid grid-cols-[90px_1fr_130px_80px_100px_48px] items-center gap-2 border-b border-zinc-100 bg-zinc-50 px-4 py-3 text-sm dark:border-zinc-800 dark:bg-zinc-950">
-      <div className="text-zinc-500">Today</div>
+      <div ref={dateRef} className="relative">
+        <button
+          type="button"
+          onClick={() => setShowDatePicker((v) => !v)}
+          className="truncate text-left text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100"
+        >
+          {format(dateValue, 'MMM d')}
+        </button>
+        {showDatePicker ? (
+          <MonthDayPicker
+            anchor={anchor}
+            selected={dateValue}
+            onSelect={(next) => {
+              setDateValue(next)
+              setShowDatePicker(false)
+            }}
+          />
+        ) : null}
+      </div>
       <input autoFocus value={description} onChange={(e) => setDescription(e.target.value)} onKeyDown={(e) => { if (e.key === 'Escape') handleEsc(); if (e.key === 'Enter') catInputRef.current?.focus() }} placeholder="Description" className="bg-transparent outline-none" />
       <div className="relative">
         <input
@@ -1433,7 +1801,40 @@ function AddTransactionRow({ accounts, categories, onDone }: { accounts: Account
           </div>
         )}
       </div>
-      <div />
+      <div ref={accountRef} className="relative">
+        <button
+          type="button"
+          onClick={() => setShowAccountDropdown((v) => !v)}
+          className="w-full truncate rounded px-1 text-left text-[11px]"
+          style={selectedAccount ? { color: selectedAccount.color } : undefined}
+        >
+          {selectedAccount?.name || 'Select'}
+        </button>
+        {showAccountDropdown ? (
+          <div className="absolute left-0 top-full z-40 mt-1 min-w-[140px] overflow-hidden rounded-lg border border-zinc-200 bg-white p-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
+            {accounts.map((account) => (
+              <button
+                key={account.id}
+                type="button"
+                onMouseDown={(e) => {
+                  e.preventDefault()
+                  setAccountId(account.id)
+                  setShowAccountDropdown(false)
+                }}
+                className={`flex w-full items-center gap-1.5 rounded-md px-2.5 py-1.5 text-left text-[11px] font-medium transition-colors ${
+                  account.id === accountId
+                    ? 'bg-zinc-100 dark:bg-zinc-800'
+                    : 'hover:bg-zinc-50 dark:hover:bg-zinc-950'
+                }`}
+                style={{ color: account.color }}
+              >
+                <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: account.color }} />
+                <span className="truncate">{account.name}</span>
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </div>
       <input value={amount} onChange={(e) => setAmount(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void create(); if (e.key === 'Escape') handleEsc() }} placeholder="$0.00" className="bg-transparent text-right outline-none" />
       <button type="button" onClick={() => void create()} className="inline-flex h-6 w-6 items-center justify-center rounded-full text-emerald-600 transition-colors hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-950/30" aria-label="Confirm"><CheckIcon /></button>
     </div>

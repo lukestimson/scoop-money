@@ -1,5 +1,5 @@
-import { mkdirSync } from 'fs'
-import { join } from 'path'
+import { copyFileSync, existsSync, mkdirSync, unlinkSync } from 'fs'
+import { dirname, join } from 'path'
 import Database from 'better-sqlite3'
 import type {
   Account,
@@ -11,11 +11,14 @@ import type {
   CategoryMappingRule,
   ExpectedIncomeEntry,
   FilingStatus,
+  ImportRuleProvider,
+  ImportTransactionRule,
   ImportedFilePreview,
   ImportedFileRecord,
   IncomeEntry,
   IncomeKind,
   IncomeTaxSettings,
+  LivingExpensesSettings,
   Transaction,
   TransactionFilters,
   TransactionSource
@@ -58,6 +61,53 @@ CREATE TABLE IF NOT EXISTS transactions (
 const CREATE_TRANSACTION_DEDUPE_INDEX = `
 CREATE INDEX IF NOT EXISTS transactions_import_dedupe_idx
 ON transactions (date, amount, description)`
+
+// Partial unique index: a provider transaction id is unique within an account.
+// Rows without an external_id (all CSV/manual/ai rows) are exempt (WHERE clause).
+const CREATE_TRANSACTION_EXTERNAL_ID_INDEX = `
+CREATE UNIQUE INDEX IF NOT EXISTS transactions_external_id_idx
+ON transactions (account_id, external_id)
+WHERE external_id IS NOT NULL`
+
+// Plaid groundwork tables. No FK REFERENCES clauses (matches this codebase's convention);
+// relationships are documented in src/types/money.ts.
+const CREATE_PLAID_ITEMS = `
+CREATE TABLE IF NOT EXISTS plaid_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_id TEXT NOT NULL UNIQUE,
+  institution_id TEXT,
+  institution_name TEXT,
+  access_token_ref TEXT NOT NULL DEFAULT '',
+  cursor TEXT,
+  status TEXT NOT NULL DEFAULT '',
+  error TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+)`
+
+const CREATE_PLAID_ACCOUNTS = `
+CREATE TABLE IF NOT EXISTS plaid_accounts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  plaid_account_id TEXT NOT NULL UNIQUE,
+  item_id TEXT NOT NULL DEFAULT '',
+  account_id INTEGER NOT NULL,
+  mask TEXT,
+  name TEXT,
+  subtype TEXT,
+  created_at INTEGER NOT NULL
+)`
+
+const CREATE_PLAID_TRANSACTION_LINKS = `
+CREATE TABLE IF NOT EXISTS plaid_transaction_links (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  plaid_transaction_id TEXT NOT NULL UNIQUE,
+  transaction_id INTEGER NOT NULL,
+  pending INTEGER NOT NULL DEFAULT 0,
+  pending_transaction_id TEXT,
+  last_provider_update INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+)`
 
 const CREATE_IMPORTED_FILES = `
 CREATE TABLE IF NOT EXISTS imported_files (
@@ -137,11 +187,23 @@ CREATE TABLE IF NOT EXISTS income_tax_settings (
   value TEXT NOT NULL
 )`
 
+const CREATE_LIVING_EXPENSES_SETTINGS = `
+CREATE TABLE IF NOT EXISTS living_expenses_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+)`
+
 const CREATE_APP_META = `
 CREATE TABLE IF NOT EXISTS app_meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 )`
+
+const DEFAULT_LIVING_EXPENSES_SETTINGS: LivingExpensesSettings = {
+  // Stored as x100 multiplier so ratio stays integer-only in persistence.
+  rent_ratio_target_x100: 300,
+  reserve_target_months: 6
+}
 
 const CREATE_CATEGORY_MAPPING_RULES = `
 CREATE TABLE IF NOT EXISTS category_mapping_rules (
@@ -153,31 +215,295 @@ CREATE TABLE IF NOT EXISTS category_mapping_rules (
   created_at INTEGER NOT NULL
 )`
 
+const CREATE_IMPORT_TRANSACTION_RULES = `
+CREATE TABLE IF NOT EXISTS import_transaction_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  provider TEXT NOT NULL DEFAULT 'capital_one',
+  match_text TEXT NOT NULL DEFAULT '',
+  mapped_category TEXT NOT NULL DEFAULT 'Uncategorized',
+  priority INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+)`
+
+const DEFAULT_CAPITAL_ONE_IMPORT_RULES: ReadonlyArray<
+  Pick<ImportTransactionRule, 'provider' | 'match_text' | 'mapped_category' | 'priority'>
+> = [
+  {
+    provider: 'capital_one',
+    match_text: 'ADOBE',
+    mapped_category: 'Subscriptions',
+    priority: 220
+  },
+  {
+    provider: 'capital_one',
+    match_text: 'OPENAI',
+    mapped_category: 'AI Fees',
+    priority: 230
+  },
+  {
+    provider: 'capital_one',
+    match_text: 'CHATGPT',
+    mapped_category: 'AI Fees',
+    priority: 225
+  },
+  {
+    provider: 'capital_one',
+    match_text: 'ANTHROPIC',
+    mapped_category: 'AI Fees',
+    priority: 220
+  },
+  {
+    provider: 'capital_one',
+    match_text: 'REPLICATE',
+    mapped_category: 'AI Fees',
+    priority: 220
+  },
+  {
+    provider: 'capital_one',
+    match_text: 'CLOUDFLARE',
+    mapped_category: 'Business Expenses',
+    priority: 210
+  },
+  {
+    provider: 'capital_one',
+    match_text: 'LNDRY',
+    mapped_category: 'Other Services',
+    priority: 205
+  },
+  {
+    provider: 'capital_one',
+    match_text: 'LAUNDRY',
+    mapped_category: 'Other Services',
+    priority: 205
+  },
+  {
+    provider: 'capital_one',
+    match_text: '220 MONTGOMERY',
+    mapped_category: 'Coffee',
+    priority: 215
+  },
+  {
+    provider: 'capital_one',
+    match_text: 'CAFE',
+    mapped_category: 'Coffee',
+    priority: 160
+  },
+  {
+    provider: 'capital_one',
+    match_text: 'ZOHO-WORKPLACE',
+    mapped_category: 'Subscriptions',
+    priority: 215
+  },
+  {
+    provider: 'capital_one',
+    match_text: 'ZOHO',
+    mapped_category: 'Subscriptions',
+    priority: 180
+  },
+  {
+    provider: 'capital_one',
+    match_text: 'LEBEAU NOB HILL MARKET',
+    mapped_category: 'Groceries',
+    priority: 210
+  },
+  {
+    provider: 'capital_one',
+    match_text: 'APPLE.COM/BILL',
+    mapped_category: 'Subscriptions',
+    priority: 210
+  },
+  {
+    provider: 'capital_one',
+    match_text: 'GOOGLE ONE',
+    mapped_category: 'Subscriptions',
+    priority: 210
+  },
+  {
+    provider: 'capital_one',
+    match_text: '7-ELEVEN',
+    mapped_category: 'Shopping',
+    priority: 175
+  },
+  {
+    provider: 'capital_one',
+    match_text: 'SHELL',
+    mapped_category: 'Shopping',
+    priority: 150
+  },
+  {
+    provider: 'capital_one',
+    match_text: 'CHEVRON',
+    mapped_category: 'Shopping',
+    priority: 150
+  },
+  {
+    provider: 'capital_one',
+    match_text: 'EXXON',
+    mapped_category: 'Shopping',
+    priority: 150
+  },
+  {
+    provider: 'capital_one',
+    match_text: 'MOBIL',
+    mapped_category: 'Shopping',
+    priority: 150
+  },
+  {
+    provider: 'capital_one',
+    match_text: 'TEXACO',
+    mapped_category: 'Shopping',
+    priority: 150
+  },
+  {
+    provider: 'capital_one',
+    match_text: 'ARCO',
+    mapped_category: 'Shopping',
+    priority: 150
+  },
+  {
+    provider: 'capital_one',
+    match_text: 'CIRCLE K',
+    mapped_category: 'Shopping',
+    priority: 150
+  },
+  {
+    provider: 'capital_one',
+    match_text: 'VALERO',
+    mapped_category: 'Shopping',
+    priority: 150
+  }
+] as const
+
 const WORKBOOK_BUDGET_DEFAULTS = [
-  { category: 'Rent', isNeed: true, standard: 1327, withParents: 1327, withAid: 1327 },
-  { category: 'Utilities', isNeed: true, standard: 135, withParents: 135, withAid: 135 },
-  { category: 'Groceries', isNeed: true, standard: 500, withParents: 500, withAid: 234 },
-  { category: 'Coffee', isNeed: true, standard: 84, withParents: 84, withAid: 84 },
-  { category: 'Internet', isNeed: true, standard: 0, withParents: 0, withAid: 0 },
-  { category: 'Gas/Automotive', isNeed: true, standard: 0, withParents: 0, withAid: 0 },
-  { category: 'Transportation', isNeed: true, standard: 25, withParents: 25, withAid: 25 },
-  { category: 'Subscriptions', isNeed: true, standard: 151, withParents: 132, withAid: 132 },
-  { category: 'Insurance', isNeed: true, standard: 23, withParents: 23, withAid: 23 },
-  { category: 'Other Services', isNeed: true, standard: 18, withParents: 18, withAid: 18 },
-  { category: 'Dining', isNeed: false, standard: 320, withParents: 320, withAid: 320 },
-  { category: 'Bar/ Alcohol', isNeed: false, standard: 100, withParents: 100, withAid: 100 },
-  { category: 'Travel', isNeed: false, standard: 142, withParents: 142, withAid: 142 },
-  { category: 'Business Expenses', isNeed: false, standard: 84, withParents: 84, withAid: 84 },
-  { category: 'Shopping', isNeed: false, standard: 97, withParents: 97, withAid: 97 },
-  { category: 'Entertainment', isNeed: false, standard: 47.5, withParents: 47.5, withAid: 47.5 },
-  { category: 'AI Fees', isNeed: false, standard: 10, withParents: 10, withAid: 10 }
+  {
+    category: 'Rent',
+    isNeed: true,
+    standard: 1327,
+    withParents: 1327,
+    withAid: 1327
+  },
+  {
+    category: 'Utilities',
+    isNeed: true,
+    standard: 135,
+    withParents: 135,
+    withAid: 135
+  },
+  {
+    category: 'Groceries',
+    isNeed: true,
+    standard: 500,
+    withParents: 500,
+    withAid: 234
+  },
+  {
+    category: 'Coffee',
+    isNeed: true,
+    standard: 84,
+    withParents: 84,
+    withAid: 84
+  },
+  {
+    category: 'Internet',
+    isNeed: true,
+    standard: 0,
+    withParents: 0,
+    withAid: 0
+  },
+  {
+    category: 'Gas/Automotive',
+    isNeed: true,
+    standard: 0,
+    withParents: 0,
+    withAid: 0
+  },
+  {
+    category: 'Transportation',
+    isNeed: true,
+    standard: 25,
+    withParents: 25,
+    withAid: 25
+  },
+  {
+    category: 'Subscriptions',
+    isNeed: true,
+    standard: 151,
+    withParents: 132,
+    withAid: 132
+  },
+  {
+    category: 'Insurance',
+    isNeed: true,
+    standard: 23,
+    withParents: 23,
+    withAid: 23
+  },
+  {
+    category: 'Other Services',
+    isNeed: true,
+    standard: 18,
+    withParents: 18,
+    withAid: 18
+  },
+  {
+    category: 'Dining',
+    isNeed: false,
+    standard: 320,
+    withParents: 320,
+    withAid: 320
+  },
+  {
+    category: 'Bar/ Alcohol',
+    isNeed: false,
+    standard: 100,
+    withParents: 100,
+    withAid: 100
+  },
+  {
+    category: 'Travel',
+    isNeed: false,
+    standard: 142,
+    withParents: 142,
+    withAid: 142
+  },
+  {
+    category: 'Business Expenses',
+    isNeed: false,
+    standard: 84,
+    withParents: 84,
+    withAid: 84
+  },
+  {
+    category: 'Shopping',
+    isNeed: false,
+    standard: 97,
+    withParents: 97,
+    withAid: 97
+  },
+  {
+    category: 'Entertainment',
+    isNeed: false,
+    standard: 47.5,
+    withParents: 47.5,
+    withAid: 47.5
+  },
+  {
+    category: 'AI Fees',
+    isNeed: false,
+    standard: 10,
+    withParents: 10,
+    withAid: 10
+  }
 ] as const
 
 const DEFAULT_NEEDS = WORKBOOK_BUDGET_DEFAULTS.filter((item) => item.isNeed)
 const DEFAULT_NICE_TO_HAVES = WORKBOOK_BUDGET_DEFAULTS.filter((item) => !item.isNeed)
 
 const WORKBOOK_BUDGET_LINES: ReadonlyArray<
-  Pick<BudgetLineItem, 'source_sheet' | 'source_row' | 'section' | 'label' | 'category' | 'notes' | 'support_scope'> & {
+  Pick<
+    BudgetLineItem,
+    'source_sheet' | 'source_row' | 'section' | 'label' | 'category' | 'notes' | 'support_scope'
+  > & {
     monthly: number
   }
 > = [
@@ -218,7 +544,8 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
     label: 'Renters Insurance',
     category: 'Rent',
     monthly: 0,
-    notes: "(Based on GPT estimate of $20-30/mo) ($300/yr) - Dont think we're paying this at Russian hill",
+    notes:
+      "(Based on GPT estimate of $20-30/mo) ($300/yr) - Dont think we're paying this at Russian hill",
     support_scope: 'none'
   },
   {
@@ -468,7 +795,8 @@ const WORKBOOK_BUDGET_LINES: ReadonlyArray<
     label: 'Film Photography (Film+ Developing+new gear)',
     category: 'Shopping',
     monthly: 42,
-    notes: '220 Film Photos personal use (Jan-May 2024) -> $1 per image = 660 film images per year -> $660 per year ($350/year on new gear) (reduced by 50%)',
+    notes:
+      '220 Film Photos personal use (Jan-May 2024) -> $1 per image = 660 film images per year -> $660 per year ($350/year on new gear) (reduced by 50%)',
     support_scope: 'none'
   },
   {
@@ -591,7 +919,9 @@ const WORKBOOK_CATEGORY_RENAMES = [
   ['Phone', 'Phone Bill']
 ] as const
 
-const DEFAULT_EXPECTED_INCOME: ReadonlyArray<Pick<ExpectedIncomeEntry, 'name' | 'notes' | 'annual_amount' | 'income_kind'>> = [
+const DEFAULT_EXPECTED_INCOME: ReadonlyArray<
+  Pick<ExpectedIncomeEntry, 'name' | 'notes' | 'annual_amount' | 'income_kind'>
+> = [
   {
     name: 'Bartending',
     notes: 'Workbook estimate: $35/hr, 25hr weeks, 48wk years.',
@@ -629,7 +959,12 @@ const DEFAULT_TAX_SETTINGS: IncomeTaxSettings = {
 }
 
 const DEFAULT_ACCOUNTS: Array<Pick<Account, 'name' | 'type' | 'institution' | 'color'>> = [
-  { name: 'Capital One', type: 'capital_one', institution: 'Capital One', color: '#ef4444' },
+  {
+    name: 'Capital One',
+    type: 'capital_one',
+    institution: 'Capital One',
+    color: '#ef4444'
+  },
   { name: 'Venmo', type: 'venmo', institution: 'Venmo', color: '#3b82f6' },
   { name: 'EBT', type: 'ebt', institution: 'EBT', color: '#10b981' },
   { name: 'Chase', type: 'chase', institution: 'Chase', color: '#0ea5e9' }
@@ -651,12 +986,20 @@ export function initDatabase(userDataPath: string): void {
   database.exec(CREATE_INCOME_ENTRIES)
   database.exec(CREATE_EXPECTED_INCOME_ENTRIES)
   database.exec(CREATE_INCOME_TAX_SETTINGS)
+  database.exec(CREATE_LIVING_EXPENSES_SETTINGS)
   database.exec(CREATE_APP_META)
   database.exec(CREATE_CATEGORY_MAPPING_RULES)
+  database.exec(CREATE_IMPORT_TRANSACTION_RULES)
+  database.exec(CREATE_PLAID_ITEMS)
+  database.exec(CREATE_PLAID_ACCOUNTS)
+  database.exec(CREATE_PLAID_TRANSACTION_LINKS)
   ensureBudgetLineItemsHasIsNeedColumn()
   ensureTransactionsHasIncomeCandidateColumn()
   ensureIncomeEntriesHasIncomeTypeColumn()
   ensureIncomeEntriesHasTipColumn()
+  ensureTransactionsHasExternalIdColumn()
+  ensureAccountsHasPlaidCutoverColumn()
+  database.exec(CREATE_TRANSACTION_EXTERNAL_ID_INDEX)
   seedDefaults()
   ensureCoreAccounts()
   runDateOnlyUtcMigration()
@@ -670,7 +1013,27 @@ export function getDatabasePath(): string {
 }
 
 export function backupDatabase(destination: string): Promise<void> {
-  return getDb().backup(destination).then(() => undefined)
+  return getDb()
+    .backup(destination)
+    .then(() => undefined)
+}
+
+/** Restore a SQLite backup made by backupDatabase, reopening the shared connection afterwards. */
+export function restoreDatabase(source: string): void {
+  if (!databasePath) throw new Error('Database has not been initialized')
+  if (!existsSync(source)) throw new Error(`Backup file does not exist: ${source}`)
+  database?.close()
+  database = null
+  // A WAL from the replaced database must not be replayed into the restored file.
+  for (const suffix of ['-wal', '-shm']) {
+    try {
+      unlinkSync(`${databasePath}${suffix}`)
+    } catch {
+      // The sidecar is absent for rollback-journal databases and clean shutdowns.
+    }
+  }
+  copyFileSync(source, databasePath)
+  initDatabase(dirname(databasePath))
 }
 
 function getDb(): Database.Database {
@@ -680,7 +1043,9 @@ function getDb(): Database.Database {
 
 function seedDefaults(): void {
   const db = getDb()
-  const accountCount = db.prepare('SELECT COUNT(*) AS count FROM accounts').get() as { count: number }
+  const accountCount = db.prepare('SELECT COUNT(*) AS count FROM accounts').get() as {
+    count: number
+  }
   if (accountCount.count === 0) {
     const insert = db.prepare(
       'INSERT INTO accounts (name, type, institution, color, created_at) VALUES (?, ?, ?, ?, ?)'
@@ -691,7 +1056,9 @@ function seedDefaults(): void {
     )
   }
 
-  const budgetCount = db.prepare('SELECT COUNT(*) AS count FROM budget_items').get() as { count: number }
+  const budgetCount = db.prepare('SELECT COUNT(*) AS count FROM budget_items').get() as {
+    count: number
+  }
   if (budgetCount.count === 0) {
     const insert = db.prepare(
       `INSERT INTO budget_items
@@ -724,7 +1091,9 @@ function seedDefaults(): void {
   }
   runWorkbookBudgetMigration()
 
-  const expectedIncomeCount = db.prepare('SELECT COUNT(*) AS count FROM expected_income_entries').get() as { count: number }
+  const expectedIncomeCount = db
+    .prepare('SELECT COUNT(*) AS count FROM expected_income_entries')
+    .get() as { count: number }
   if (expectedIncomeCount.count === 0) {
     const insert = db.prepare(
       `INSERT INTO expected_income_entries
@@ -737,17 +1106,46 @@ function seedDefaults(): void {
     )
   }
 
-  const taxSettingCount = db.prepare('SELECT COUNT(*) AS count FROM income_tax_settings').get() as { count: number }
+  const taxSettingCount = db.prepare('SELECT COUNT(*) AS count FROM income_tax_settings').get() as {
+    count: number
+  }
   if (taxSettingCount.count === 0) {
     const insert = db.prepare('INSERT INTO income_tax_settings (key, value) VALUES (?, ?)')
     Object.entries(DEFAULT_TAX_SETTINGS).forEach(([key, value]) => insert.run(key, String(value)))
+  }
+
+  const livingExpensesSettingsCount = db
+    .prepare('SELECT COUNT(*) AS count FROM living_expenses_settings')
+    .get() as {
+    count: number
+  }
+  if (livingExpensesSettingsCount.count === 0) {
+    const insert = db.prepare('INSERT INTO living_expenses_settings (key, value) VALUES (?, ?)')
+    Object.entries(DEFAULT_LIVING_EXPENSES_SETTINGS).forEach(([key, value]) =>
+      insert.run(key, String(value))
+    )
+  }
+
+  const importRuleCount = db
+    .prepare('SELECT COUNT(*) AS count FROM import_transaction_rules')
+    .get() as { count: number }
+  if (importRuleCount.count === 0) {
+    const insert = db.prepare(
+      `INSERT INTO import_transaction_rules (provider, match_text, mapped_category, priority, created_at)
+       VALUES (?, ?, ?, ?, ?)`
+    )
+    const stamp = now()
+    DEFAULT_CAPITAL_ONE_IMPORT_RULES.forEach((rule) =>
+      insert.run(rule.provider, rule.match_text, rule.mapped_category, rule.priority, stamp)
+    )
   }
 }
 
 function ensureCoreAccounts(): void {
   const db = getDb()
   const stamp = now()
-  const accounts = () => db.prepare('SELECT * FROM accounts ORDER BY id ASC').all().map(rowToAccount)
+  const accounts = () =>
+    db.prepare('SELECT * FROM accounts ORDER BY id ASC').all().map(rowToAccount)
   const takenIds = new Set<number>()
 
   DEFAULT_ACCOUNTS.forEach((core) => {
@@ -755,32 +1153,50 @@ function ensureCoreAccounts(): void {
     const exact = current.find((account) => account.name.toLowerCase() === core.name.toLowerCase())
     if (exact) {
       takenIds.add(exact.id)
-      db.prepare('UPDATE accounts SET type = ?, institution = ?, color = ? WHERE id = ?')
-        .run(core.type, core.institution, exact.color || core.color, exact.id)
+      db.prepare('UPDATE accounts SET type = ?, institution = ?, color = ? WHERE id = ?').run(
+        core.type,
+        core.institution,
+        exact.color || core.color,
+        exact.id
+      )
       return
     }
 
-    const legacy = current.find((account) => !takenIds.has(account.id) && inferCoreAccountType(account) === core.type)
+    const legacy = current.find(
+      (account) => !takenIds.has(account.id) && inferCoreAccountType(account) === core.type
+    )
     if (legacy) {
       takenIds.add(legacy.id)
-      db.prepare('UPDATE accounts SET name = ?, type = ?, institution = ?, color = ? WHERE id = ?')
-        .run(core.name, core.type, core.institution, legacy.color || core.color, legacy.id)
+      db.prepare(
+        'UPDATE accounts SET name = ?, type = ?, institution = ?, color = ? WHERE id = ?'
+      ).run(core.name, core.type, core.institution, legacy.color || core.color, legacy.id)
       return
     }
 
-    db.prepare('INSERT INTO accounts (name, type, institution, color, created_at) VALUES (?, ?, ?, ?, ?)')
-      .run(core.name, core.type, core.institution, core.color, stamp)
+    db.prepare(
+      'INSERT INTO accounts (name, type, institution, color, created_at) VALUES (?, ?, ?, ?, ?)'
+    ).run(core.name, core.type, core.institution, core.color, stamp)
   })
 
-  const coreByType = new Map(accounts().filter((account) => isCoreAccount(account)).map((account) => [account.type, account]))
+  const coreByType = new Map(
+    accounts()
+      .filter((account) => isCoreAccount(account))
+      .map((account) => [account.type, account])
+  )
   accounts()
     .filter((account) => !isCoreAccount(account))
     .forEach((account) => {
       const targetType = inferCoreAccountType(account)
       const target = coreByType.get(targetType) ?? coreByType.get('chase')
       if (target) {
-        db.prepare('UPDATE transactions SET account_id = ? WHERE account_id = ?').run(target.id, account.id)
-        db.prepare('UPDATE imported_files SET account_id = ? WHERE account_id = ?').run(target.id, account.id)
+        db.prepare('UPDATE transactions SET account_id = ? WHERE account_id = ?').run(
+          target.id,
+          account.id
+        )
+        db.prepare('UPDATE imported_files SET account_id = ? WHERE account_id = ?').run(
+          target.id,
+          account.id
+        )
       }
       db.prepare('DELETE FROM accounts WHERE id = ?').run(account.id)
     })
@@ -793,16 +1209,31 @@ function isCoreAccount(account: Account): boolean {
 function inferCoreAccountType(account: Account): AccountType {
   const name = account.name.toLowerCase()
   const rawType = String(account.type)
-  if (name.includes('capital') || name.includes('credit') || rawType === 'credit' || rawType === 'capital_one') return 'capital_one'
+  if (
+    name.includes('capital') ||
+    name.includes('credit') ||
+    rawType === 'credit' ||
+    rawType === 'capital_one'
+  )
+    return 'capital_one'
   if (name.includes('venmo') || rawType === 'venmo') return 'venmo'
   if (name.includes('ebt') || rawType === 'ebt') return 'ebt'
-  if (name.includes('chase') || name.includes('checking') || rawType === 'checking' || rawType === 'savings' || rawType === 'chase') return 'chase'
+  if (
+    name.includes('chase') ||
+    name.includes('checking') ||
+    rawType === 'checking' ||
+    rawType === 'savings' ||
+    rawType === 'chase'
+  )
+    return 'chase'
   return 'chase'
 }
 
 function runDateOnlyUtcMigration(): void {
   const db = getDb()
-  const flag = db.prepare('SELECT value FROM app_meta WHERE key = ?').get('money_local_date_only_noon_v1')
+  const flag = db
+    .prepare('SELECT value FROM app_meta WHERE key = ?')
+    .get('money_local_date_only_noon_v1')
   if (flag) return
   shiftUtcMidnightDates('transactions', 'date')
   shiftUtcMidnightDates('income_entries', 'date')
@@ -816,7 +1247,11 @@ function runDateOnlyUtcMigration(): void {
 
 function shiftUtcMidnightDates(table: string, column: string): void {
   const db = getDb()
-  const rows = db.prepare(`SELECT id, ${column} AS value FROM ${table} WHERE ${column} IS NOT NULL AND ${column} > 0`).all() as Array<{ id: number; value: number }>
+  const rows = db
+    .prepare(
+      `SELECT id, ${column} AS value FROM ${table} WHERE ${column} IS NOT NULL AND ${column} > 0`
+    )
+    .all() as Array<{ id: number; value: number }>
   const update = db.prepare(`UPDATE ${table} SET ${column} = ? WHERE id = ?`)
   rows.forEach((row) => {
     if (row.value % 86400 !== 0) return
@@ -826,27 +1261,43 @@ function shiftUtcMidnightDates(table: string, column: string): void {
 
 function localNoonForUtcCalendarDate(unix: number): number {
   const date = new Date(unix * 1000)
-  return Math.floor(new Date(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 12, 0, 0, 0).getTime() / 1000)
+  return Math.floor(
+    new Date(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 12, 0, 0, 0).getTime() /
+      1000
+  )
 }
 
 function runWorkbookBudgetMigration(): void {
   const db = getDb()
-  const flag = db.prepare('SELECT value FROM app_meta WHERE key = ?').get('workbook_budget_reconciliation_v2')
+  const flag = db
+    .prepare('SELECT value FROM app_meta WHERE key = ?')
+    .get('workbook_budget_reconciliation_v2')
   if (flag) return
 
   WORKBOOK_CATEGORY_RENAMES.forEach(([from, to]) => {
     const target = db.prepare('SELECT id FROM budget_items WHERE category = ? LIMIT 1').get(to) as
       | { id: number }
       | undefined
-    const source = db.prepare('SELECT id FROM budget_items WHERE category = ? LIMIT 1').get(from) as { id: number } | undefined
+    const source = db
+      .prepare('SELECT id FROM budget_items WHERE category = ? LIMIT 1')
+      .get(from) as { id: number } | undefined
     if (source && !target) {
-      db.prepare('UPDATE budget_items SET category = ?, updated_at = ? WHERE id = ?').run(to, now(), source.id)
+      db.prepare('UPDATE budget_items SET category = ?, updated_at = ? WHERE id = ?').run(
+        to,
+        now(),
+        source.id
+      )
     } else if (source && target) {
       db.prepare('DELETE FROM budget_items WHERE id = ?').run(source.id)
     }
-    db.prepare('UPDATE transactions SET mapped_category = ? WHERE mapped_category = ?').run(to, from)
+    db.prepare('UPDATE transactions SET mapped_category = ? WHERE mapped_category = ?').run(
+      to,
+      from
+    )
     db.prepare('UPDATE transactions SET raw_category = ? WHERE raw_category = ?').run(to, from)
-    db.prepare('UPDATE category_mapping_rules SET mapped_category = ? WHERE mapped_category = ?').run(to, from)
+    db.prepare(
+      'UPDATE category_mapping_rules SET mapped_category = ? WHERE mapped_category = ?'
+    ).run(to, from)
   })
 
   const existing = db.prepare('SELECT id FROM budget_items WHERE category = ? LIMIT 1')
@@ -926,15 +1377,37 @@ function runWorkbookBudgetMigration(): void {
 }
 
 function budgetLineItemsHasIsNeedColumn(db: Database.Database): boolean {
-  const rows = db.prepare('PRAGMA table_info(budget_line_items)').all() as { name: string }[]
+  const rows = db.prepare('PRAGMA table_info(budget_line_items)').all() as {
+    name: string
+  }[]
   return rows.some((row) => row.name === 'is_need')
 }
 
 function ensureTransactionsHasIncomeCandidateColumn(): void {
   const db = getDb()
-  const cols = db.prepare('PRAGMA table_info(transactions)').all() as { name: string }[]
+  const cols = db.prepare('PRAGMA table_info(transactions)').all() as {
+    name: string
+  }[]
   if (cols.some((c) => c.name === 'income_candidate')) return
   db.exec('ALTER TABLE transactions ADD COLUMN income_candidate INTEGER NOT NULL DEFAULT 0')
+}
+
+function ensureTransactionsHasExternalIdColumn(): void {
+  const db = getDb()
+  const cols = db.prepare('PRAGMA table_info(transactions)').all() as {
+    name: string
+  }[]
+  if (cols.some((c) => c.name === 'external_id')) return
+  db.exec('ALTER TABLE transactions ADD COLUMN external_id TEXT')
+}
+
+function ensureAccountsHasPlaidCutoverColumn(): void {
+  const db = getDb()
+  const cols = db.prepare('PRAGMA table_info(accounts)').all() as {
+    name: string
+  }[]
+  if (cols.some((c) => c.name === 'plaid_cutover_date')) return
+  db.exec('ALTER TABLE accounts ADD COLUMN plaid_cutover_date INTEGER')
 }
 
 function inferIncomeTypeFromText(company: string, shootName: string, notes: string): string {
@@ -947,23 +1420,40 @@ function inferIncomeTypeFromText(company: string, shootName: string, notes: stri
 
 function ensureIncomeEntriesHasIncomeTypeColumn(): void {
   const db = getDb()
-  const cols = db.prepare('PRAGMA table_info(income_entries)').all() as { name: string }[]
+  const cols = db.prepare('PRAGMA table_info(income_entries)').all() as {
+    name: string
+  }[]
   if (!cols.some((c) => c.name === 'income_type')) {
     db.exec("ALTER TABLE income_entries ADD COLUMN income_type TEXT NOT NULL DEFAULT ''")
   }
   const rows = db
     .prepare('SELECT id, company, shoot_name, notes, income_type FROM income_entries')
-    .all() as { id: number; company: string; shoot_name: string; notes: string; income_type: string }[]
+    .all() as {
+    id: number
+    company: string
+    shoot_name: string
+    notes: string
+    income_type: string
+  }[]
   const update = db.prepare('UPDATE income_entries SET income_type = ? WHERE id = ?')
   for (const row of rows) {
     if (String(row.income_type ?? '').trim()) continue
-    update.run(inferIncomeTypeFromText(String(row.company ?? ''), String(row.shoot_name ?? ''), String(row.notes ?? '')), row.id)
+    update.run(
+      inferIncomeTypeFromText(
+        String(row.company ?? ''),
+        String(row.shoot_name ?? ''),
+        String(row.notes ?? '')
+      ),
+      row.id
+    )
   }
 }
 
 function ensureIncomeEntriesHasTipColumn(): void {
   const db = getDb()
-  const cols = db.prepare('PRAGMA table_info(income_entries)').all() as { name: string }[]
+  const cols = db.prepare('PRAGMA table_info(income_entries)').all() as {
+    name: string
+  }[]
   if (!cols.some((c) => c.name === 'tip')) {
     db.exec('ALTER TABLE income_entries ADD COLUMN tip INTEGER')
   }
@@ -973,7 +1463,9 @@ function ensureBudgetLineItemsHasIsNeedColumn(): void {
   const db = getDb()
   if (budgetLineItemsHasIsNeedColumn(db)) return
   db.exec('ALTER TABLE budget_line_items ADD COLUMN is_need INTEGER NOT NULL DEFAULT 1')
-  db.prepare(`UPDATE budget_line_items SET is_need = 0 WHERE lower(section) LIKE '%wants%' OR lower(section) LIKE '%nice%'`).run()
+  db.prepare(
+    `UPDATE budget_line_items SET is_need = 0 WHERE lower(section) LIKE '%wants%' OR lower(section) LIKE '%nice%'`
+  ).run()
   db.prepare(
     `UPDATE budget_line_items SET is_need = (
        SELECT CASE WHEN bi.is_need THEN 1 ELSE 0 END FROM budget_items bi WHERE bi.category = budget_line_items.category LIMIT 1
@@ -984,19 +1476,29 @@ function ensureBudgetLineItemsHasIsNeedColumn(): void {
 function runMoneyBudgetAllowlistMigration(): void {
   const db = getDb()
   ensureBudgetLineItemsHasIsNeedColumn()
-  const flag = db.prepare('SELECT value FROM app_meta WHERE key = ?').get('money_budget_allowlist_v3')
+  const flag = db
+    .prepare('SELECT value FROM app_meta WHERE key = ?')
+    .get('money_budget_allowlist_v3')
   if (flag) return
 
-  db.prepare(`UPDATE budget_line_items SET category = 'Utilities' WHERE category = 'Phone Bill'`).run()
-  db.prepare(`UPDATE budget_line_items SET category = 'Insurance' WHERE category IN ('Healthcare', 'Medical')`).run()
+  db.prepare(
+    `UPDATE budget_line_items SET category = 'Utilities' WHERE category = 'Phone Bill'`
+  ).run()
+  db.prepare(
+    `UPDATE budget_line_items SET category = 'Insurance' WHERE category IN ('Healthcare', 'Medical')`
+  ).run()
   db.prepare(`UPDATE budget_line_items SET category = 'Travel' WHERE category = 'Car Rental'`).run()
-  db.prepare(`UPDATE budget_line_items SET category = 'Other Services' WHERE category = 'Misc'`).run()
+  db.prepare(
+    `UPDATE budget_line_items SET category = 'Other Services' WHERE category = 'Misc'`
+  ).run()
 
   const placeholders = BUDGET_CATEGORY_ORDER.map(() => '?').join(',')
-  db.prepare(`DELETE FROM budget_line_items WHERE trim(category) = '' OR category NOT IN (${placeholders})`).run(
+  db.prepare(
+    `DELETE FROM budget_line_items WHERE trim(category) = '' OR category NOT IN (${placeholders})`
+  ).run(...BUDGET_CATEGORY_ORDER)
+  db.prepare(`DELETE FROM budget_items WHERE category NOT IN (${placeholders})`).run(
     ...BUDGET_CATEGORY_ORDER
   )
-  db.prepare(`DELETE FROM budget_items WHERE category NOT IN (${placeholders})`).run(...BUDGET_CATEGORY_ORDER)
 
   const stamp = now()
   const insertItem = db.prepare(
@@ -1022,12 +1524,17 @@ function runMoneyBudgetAllowlistMigration(): void {
 
 function runBudgetLineNeedWorkbookMigration(): void {
   const db = getDb()
-  const flag = db.prepare('SELECT value FROM app_meta WHERE key = ?').get('money_budget_line_need_workbook_v1')
+  const flag = db
+    .prepare('SELECT value FROM app_meta WHERE key = ?')
+    .get('money_budget_line_need_workbook_v1')
   if (flag) return
 
-  const rows = db
-    .prepare('SELECT id, category, label, section FROM budget_line_items')
-    .all() as { id: number; category: string; label: string; section: string }[]
+  const rows = db.prepare('SELECT id, category, label, section FROM budget_line_items').all() as {
+    id: number
+    category: string
+    label: string
+    section: string
+  }[]
   const stamp = now()
   const update = db.prepare(`UPDATE budget_line_items SET is_need = ?, updated_at = ? WHERE id = ?`)
   for (const row of rows) {
@@ -1047,9 +1554,13 @@ function runBudgetLineNeedWorkbookMigration(): void {
 
 function runBudgetSectionNeedsWantsLabelsMigration(): void {
   const db = getDb()
-  const flag = db.prepare('SELECT value FROM app_meta WHERE key = ?').get('money_budget_section_needs_wants_v1')
+  const flag = db
+    .prepare('SELECT value FROM app_meta WHERE key = ?')
+    .get('money_budget_section_needs_wants_v1')
   if (flag) return
-  db.prepare(`UPDATE budget_line_items SET section = 'Wants' WHERE lower(section) LIKE '%nice%'`).run()
+  db.prepare(
+    `UPDATE budget_line_items SET section = 'Wants' WHERE lower(section) LIKE '%nice%'`
+  ).run()
   db.prepare(
     `UPDATE budget_line_items SET section = 'Needs' WHERE lower(section) LIKE '%must-have%' OR section = 'Must-Have Expenses'`
   ).run()
@@ -1060,7 +1571,8 @@ function runBudgetSectionNeedsWantsLabelsMigration(): void {
 }
 
 function parseAccountType(value: unknown): AccountType {
-  if (value === 'capital_one' || value === 'venmo' || value === 'ebt' || value === 'chase') return value
+  if (value === 'capital_one' || value === 'venmo' || value === 'ebt' || value === 'chase')
+    return value
   if (value === 'credit') return 'capital_one'
   if (value === 'checking' || value === 'savings') return 'chase'
   return 'chase'
@@ -1090,6 +1602,10 @@ function rowToAccount(row: unknown): Account {
     type: parseAccountType(r.type),
     institution: String(r.institution ?? ''),
     color: String(r.color ?? '#a1a1aa'),
+    plaid_cutover_date:
+      r.plaid_cutover_date === null || r.plaid_cutover_date === undefined
+        ? null
+        : Number(r.plaid_cutover_date),
     created_at: Number(r.created_at ?? 0)
   }
 }
@@ -1107,6 +1623,7 @@ function rowToTransaction(row: unknown): Transaction {
     source: parseSource(r.source),
     notes: String(r.notes ?? ''),
     income_candidate: Boolean(r.income_candidate),
+    external_id: (r.external_id as string | null) ?? null,
     created_at: Number(r.created_at ?? 0),
     updated_at: Number(r.updated_at ?? 0)
   }
@@ -1118,7 +1635,7 @@ function parseImportedFilePreview(value: unknown): ImportedFilePreview {
     return {
       headers: Array.isArray(parsed.headers) ? parsed.headers.map(String) : [],
       rows: Array.isArray(parsed.rows)
-        ? parsed.rows.map((row) => Array.isArray(row) ? row.map(String) : [])
+        ? parsed.rows.map((row) => (Array.isArray(row) ? row.map(String) : []))
         : [],
       rowCount: Number(parsed.rowCount ?? 0),
       columnCount: Number(parsed.columnCount ?? 0)
@@ -1140,8 +1657,14 @@ function rowToImportedFile(row: unknown): ImportedFileRecord {
     imported_count: Number(r.imported_count ?? 0),
     skipped_count: Number(r.skipped_count ?? 0),
     error_count: Number(r.error_count ?? 0),
-    first_transaction_date: r.first_transaction_date === null || r.first_transaction_date === undefined ? null : Number(r.first_transaction_date),
-    last_transaction_date: r.last_transaction_date === null || r.last_transaction_date === undefined ? null : Number(r.last_transaction_date),
+    first_transaction_date:
+      r.first_transaction_date === null || r.first_transaction_date === undefined
+        ? null
+        : Number(r.first_transaction_date),
+    last_transaction_date:
+      r.last_transaction_date === null || r.last_transaction_date === undefined
+        ? null
+        : Number(r.last_transaction_date),
     preview: parseImportedFilePreview(r.preview_json),
     created_at: Number(r.created_at ?? 0)
   }
@@ -1180,18 +1703,19 @@ function rowToBudgetLineItem(row: unknown): BudgetLineItem {
   }
 }
 
-function rowToIncomeEntry(row: any): IncomeEntry {
+function rowToIncomeEntry(row: unknown): IncomeEntry {
+  const r = row as Record<string, unknown>
   return {
-    id: row.id,
-    shoot_name: row.shoot_name,
-    company: row.company,
-    income_type: row.income_type,
-    date: row.date,
-    amount: row.amount,
-    tip: row.tip ?? 0,
-    notes: row.notes,
-    created_at: row.created_at,
-    updated_at: row.updated_at
+    id: Number(r.id),
+    shoot_name: String(r.shoot_name ?? ''),
+    company: String(r.company ?? ''),
+    income_type: String(r.income_type ?? ''),
+    date: Number(r.date ?? 0),
+    amount: Number(r.amount ?? 0),
+    tip: r.tip === null || r.tip === undefined ? null : Number(r.tip),
+    notes: String(r.notes ?? ''),
+    created_at: Number(r.created_at ?? 0),
+    updated_at: Number(r.updated_at ?? 0)
   }
 }
 
@@ -1214,6 +1738,22 @@ function rowToCategoryRule(row: unknown): CategoryMappingRule {
     id: Number(r.id),
     raw_category: String(r.raw_category ?? ''),
     description_contains: String(r.description_contains ?? ''),
+    mapped_category: String(r.mapped_category ?? ''),
+    priority: Number(r.priority ?? 0),
+    created_at: Number(r.created_at ?? 0)
+  }
+}
+
+function parseImportRuleProvider(value: unknown): ImportRuleProvider {
+  return value === 'capital_one' ? 'capital_one' : 'capital_one'
+}
+
+function rowToImportTransactionRule(row: unknown): ImportTransactionRule {
+  const r = row as Record<string, unknown>
+  return {
+    id: Number(r.id),
+    provider: parseImportRuleProvider(r.provider),
+    match_text: String(r.match_text ?? ''),
     mapped_category: String(r.mapped_category ?? ''),
     priority: Number(r.priority ?? 0),
     created_at: Number(r.created_at ?? 0)
@@ -1255,10 +1795,17 @@ export function getTransactionsByPeriod(start: number, end: number): Transaction
 }
 
 function normalizeDuplicateDescription(description: string): string {
-  return description.trim().toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, ' ').trim()
+  return description
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, 'and')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
 }
 
-export function getImportedFiles(filters: { start?: number; end?: number } = {}): ImportedFileRecord[] {
+export function getImportedFiles(
+  filters: { start?: number; end?: number } = {}
+): ImportedFileRecord[] {
   const clauses: string[] = []
   const params: number[] = []
   if (filters.start !== undefined && filters.end !== undefined) {
@@ -1311,7 +1858,9 @@ export function recordImportedFile(data: {
       JSON.stringify(data.preview),
       now()
     )
-  const row = getDb().prepare('SELECT * FROM imported_files WHERE id = ?').get(Number(result.lastInsertRowid))
+  const row = getDb()
+    .prepare('SELECT * FROM imported_files WHERE id = ?')
+    .get(Number(result.lastInsertRowid))
   return rowToImportedFile(row)
 }
 
@@ -1340,7 +1889,9 @@ export function clearImportedFile(fileId: number): Transaction[] {
 export function clearIncomeCandidateFlags(ids: number[]): void {
   if (ids.length === 0) return
   const placeholders = ids.map(() => '?').join(',')
-  getDb().prepare(`UPDATE transactions SET income_candidate = 0 WHERE id IN (${placeholders})`).run(...ids)
+  getDb()
+    .prepare(`UPDATE transactions SET income_candidate = 0 WHERE id IN (${placeholders})`)
+    .run(...ids)
 }
 
 export function transactionExists(date: number, description: string, amount: number): boolean {
@@ -1357,14 +1908,28 @@ export function createTransaction(data: Partial<Transaction>): Transaction {
   const description = data.description ?? ''
   const amount = Math.round(data.amount ?? 0)
   const raw = data.raw_category ?? ''
-  const mapped = data.mapped_category || applyRulesToCategory(raw, description) || raw || 'Uncategorized'
+  const mapped =
+    data.mapped_category || applyRulesToCategory(raw, description) || raw || 'Uncategorized'
   const result = getDb()
     .prepare(
       `INSERT INTO transactions
-       (date, description, amount, raw_category, mapped_category, account_id, source, notes, income_candidate, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       (date, description, amount, raw_category, mapped_category, account_id, source, notes, income_candidate, external_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(date, description, amount, raw, mapped, data.account_id ?? null, data.source ?? 'manual', data.notes ?? '', data.income_candidate ? 1 : 0, stamp, stamp)
+    .run(
+      date,
+      description,
+      amount,
+      raw,
+      mapped,
+      data.account_id ?? null,
+      data.source ?? 'manual',
+      data.notes ?? '',
+      data.income_candidate ? 1 : 0,
+      data.external_id ?? null,
+      stamp,
+      stamp
+    )
   return getTransactionById(Number(result.lastInsertRowid))
 }
 
@@ -1373,12 +1938,15 @@ export function updateTransaction(id: number, data: Partial<Transaction>): Trans
   const description = data.description ?? existing.description
   const rawCategory = data.raw_category ?? existing.raw_category
   const mappedCategory =
-    data.mapped_category ?? existing.mapped_category ?? applyRulesToCategory(rawCategory, description) ?? ''
+    data.mapped_category ??
+    existing.mapped_category ??
+    applyRulesToCategory(rawCategory, description) ??
+    ''
   getDb()
     .prepare(
       `UPDATE transactions
        SET date = ?, description = ?, amount = ?, raw_category = ?, mapped_category = ?,
-           account_id = ?, source = ?, notes = ?, income_candidate = ?, updated_at = ?
+           account_id = ?, source = ?, notes = ?, income_candidate = ?, external_id = ?, updated_at = ?
        WHERE id = ?`
     )
     .run(
@@ -1390,7 +1958,14 @@ export function updateTransaction(id: number, data: Partial<Transaction>): Trans
       data.account_id === undefined ? existing.account_id : data.account_id,
       data.source ?? existing.source,
       data.notes ?? existing.notes,
-      data.income_candidate === undefined ? (existing.income_candidate ? 1 : 0) : (data.income_candidate ? 1 : 0),
+      data.income_candidate === undefined
+        ? existing.income_candidate
+          ? 1
+          : 0
+        : data.income_candidate
+          ? 1
+          : 0,
+      data.external_id === undefined ? existing.external_id : data.external_id,
       now(),
       id
     )
@@ -1447,7 +2022,13 @@ export function createBudgetLineItem(data: Partial<BudgetLineItem>): BudgetLineI
   const sourceRow = data.source_row ?? nextBudgetLineSourceRow(sourceSheet)
   const category = data.category ?? ''
   const lineIsNeed =
-    data.is_need === true ? 1 : data.is_need === false ? 0 : inferLineIsNeed(category, data.label ?? '') ? 1 : 0
+    data.is_need === true
+      ? 1
+      : data.is_need === false
+        ? 0
+        : inferLineIsNeed(category, data.label ?? '')
+          ? 1
+          : 0
   const section =
     data.section && String(data.section).trim() !== ''
       ? data.section
@@ -1532,12 +2113,24 @@ function nextBudgetLineSourceRow(sourceSheet: string): number {
 function syncBudgetItemTotalsForCategory(category: string): void {
   if (!category.trim()) return
   const lines = getDb()
-    .prepare("SELECT monthly_amount, support_scope FROM budget_line_items WHERE category = ? AND section <> 'Parental & Gov Help'")
+    .prepare(
+      "SELECT monthly_amount, support_scope FROM budget_line_items WHERE category = ? AND section <> 'Parental & Gov Help'"
+    )
     .all(category)
     .map(rowToBudgetLineItem)
   const standard = lines.reduce((sum, line) => sum + line.monthly_amount, 0)
-  const withParents = lines.reduce((sum, line) => sum + (line.support_scope === 'parental' ? 0 : line.monthly_amount), 0)
-  const withAid = lines.reduce((sum, line) => sum + (line.support_scope === 'parental' || line.support_scope === 'government' ? 0 : line.monthly_amount), 0)
+  const withParents = lines.reduce(
+    (sum, line) => sum + (line.support_scope === 'parental' ? 0 : line.monthly_amount),
+    0
+  )
+  const withAid = lines.reduce(
+    (sum, line) =>
+      sum +
+      (line.support_scope === 'parental' || line.support_scope === 'government'
+        ? 0
+        : line.monthly_amount),
+    0
+  )
   getDb()
     .prepare(
       `UPDATE budget_items
@@ -1612,20 +2205,34 @@ export function getOrCreateAccountByName(name: string, type: Account['type'] = '
 export function createAccount(data: Partial<Account>): Account {
   const stamp = now()
   const result = getDb()
-    .prepare('INSERT INTO accounts (name, type, institution, color, created_at) VALUES (?, ?, ?, ?, ?)')
-    .run(data.name ?? 'Chase', data.type ?? 'chase', data.institution ?? '', data.color ?? '#a1a1aa', stamp)
+    .prepare(
+      'INSERT INTO accounts (name, type, institution, color, plaid_cutover_date, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+    )
+    .run(
+      data.name ?? 'Chase',
+      data.type ?? 'chase',
+      data.institution ?? '',
+      data.color ?? '#a1a1aa',
+      data.plaid_cutover_date ?? null,
+      stamp
+    )
   return getAccountById(Number(result.lastInsertRowid))
 }
 
 export function updateAccount(id: number, data: Partial<Account>): Account {
   const existing = getAccountById(id)
   getDb()
-    .prepare('UPDATE accounts SET name = ?, type = ?, institution = ?, color = ? WHERE id = ?')
+    .prepare(
+      'UPDATE accounts SET name = ?, type = ?, institution = ?, color = ?, plaid_cutover_date = ? WHERE id = ?'
+    )
     .run(
       data.name ?? existing.name,
       data.type ?? existing.type,
       data.institution ?? existing.institution,
       data.color ?? existing.color,
+      data.plaid_cutover_date === undefined
+        ? existing.plaid_cutover_date
+        : data.plaid_cutover_date,
       id
     )
   return getAccountById(id)
@@ -1643,7 +2250,10 @@ function getAccountById(id: number): Account {
 }
 
 export function getAllIncomeEntries(): IncomeEntry[] {
-  return getDb().prepare('SELECT * FROM income_entries ORDER BY date DESC, id DESC').all().map(rowToIncomeEntry)
+  return getDb()
+    .prepare('SELECT * FROM income_entries ORDER BY date DESC, id DESC')
+    .all()
+    .map(rowToIncomeEntry)
 }
 
 export function createIncomeEntry(data: Partial<IncomeEntry>): IncomeEntry {
@@ -1651,7 +2261,8 @@ export function createIncomeEntry(data: Partial<IncomeEntry>): IncomeEntry {
   const company = data.company ?? ''
   const shootName = data.shoot_name ?? ''
   const notes = data.notes ?? ''
-  const incomeType = String(data.income_type ?? '').trim() || inferIncomeTypeFromText(company, shootName, notes)
+  const incomeType =
+    String(data.income_type ?? '').trim() || inferIncomeTypeFromText(company, shootName, notes)
   const result = getDb()
     .prepare(
       `INSERT INTO income_entries (shoot_name, company, income_type, date, amount, tip, notes, created_at, updated_at)
@@ -1673,9 +2284,12 @@ export function createIncomeEntry(data: Partial<IncomeEntry>): IncomeEntry {
 
 export function updateIncomeEntry(id: number, data: Partial<IncomeEntry>): IncomeEntry {
   const existing = getIncomeEntryById(id)
-  const tipVal = data.tip === null ? null : data.tip !== undefined ? Math.round(data.tip) : existing.tip
+  const tipVal =
+    data.tip === null ? null : data.tip !== undefined ? Math.round(data.tip) : existing.tip
   getDb()
-    .prepare('UPDATE income_entries SET shoot_name = ?, company = ?, income_type = ?, date = ?, amount = ?, tip = ?, notes = ?, updated_at = ? WHERE id = ?')
+    .prepare(
+      'UPDATE income_entries SET shoot_name = ?, company = ?, income_type = ?, date = ?, amount = ?, tip = ?, notes = ?, updated_at = ? WHERE id = ?'
+    )
     .run(
       data.shoot_name ?? existing.shoot_name,
       data.company ?? existing.company,
@@ -1701,7 +2315,10 @@ function getIncomeEntryById(id: number): IncomeEntry {
 }
 
 export function getAllExpectedIncomeEntries(): ExpectedIncomeEntry[] {
-  return getDb().prepare('SELECT * FROM expected_income_entries ORDER BY id ASC').all().map(rowToExpectedIncomeEntry)
+  return getDb()
+    .prepare('SELECT * FROM expected_income_entries ORDER BY id ASC')
+    .all()
+    .map(rowToExpectedIncomeEntry)
 }
 
 export function createExpectedIncomeEntry(data: Partial<ExpectedIncomeEntry>): ExpectedIncomeEntry {
@@ -1723,7 +2340,10 @@ export function createExpectedIncomeEntry(data: Partial<ExpectedIncomeEntry>): E
   return getExpectedIncomeEntryById(Number(result.lastInsertRowid))
 }
 
-export function updateExpectedIncomeEntry(id: number, data: Partial<ExpectedIncomeEntry>): ExpectedIncomeEntry {
+export function updateExpectedIncomeEntry(
+  id: number,
+  data: Partial<ExpectedIncomeEntry>
+): ExpectedIncomeEntry {
   const existing = getExpectedIncomeEntryById(id)
   getDb()
     .prepare(
@@ -1753,7 +2373,10 @@ function getExpectedIncomeEntryById(id: number): ExpectedIncomeEntry {
 }
 
 export function getIncomeTaxSettings(): IncomeTaxSettings {
-  const rows = getDb().prepare('SELECT key, value FROM income_tax_settings').all() as Array<{ key: string; value: string }>
+  const rows = getDb().prepare('SELECT key, value FROM income_tax_settings').all() as Array<{
+    key: string
+    value: string
+  }>
   const values = new Map(rows.map((row) => [row.key, row.value]))
   return {
     filing_status: parseFilingStatus(values.get('filing_status')),
@@ -1778,8 +2401,48 @@ export function updateIncomeTaxSettings(data: Partial<IncomeTaxSettings>): Incom
   return getIncomeTaxSettings()
 }
 
+export function getLivingExpensesSettings(): LivingExpensesSettings {
+  const rows = getDb().prepare('SELECT key, value FROM living_expenses_settings').all() as Array<{
+    key: string
+    value: string
+  }>
+  const values = new Map(rows.map((row) => [row.key, row.value]))
+  const rentRatioParsed = Number(values.get('rent_ratio_target_x100'))
+  const reserveMonthsParsed = Number(values.get('reserve_target_months'))
+  return {
+    rent_ratio_target_x100: Number.isFinite(rentRatioParsed)
+      ? Math.max(50, Math.round(rentRatioParsed))
+      : DEFAULT_LIVING_EXPENSES_SETTINGS.rent_ratio_target_x100,
+    reserve_target_months: Number.isFinite(reserveMonthsParsed)
+      ? Math.max(1, Math.round(reserveMonthsParsed))
+      : DEFAULT_LIVING_EXPENSES_SETTINGS.reserve_target_months
+  }
+}
+
+export function updateLivingExpensesSettings(
+  data: Partial<LivingExpensesSettings>
+): LivingExpensesSettings {
+  const upsert = getDb().prepare(
+    `INSERT INTO living_expenses_settings (key, value)
+     VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+  )
+  if (data.rent_ratio_target_x100 !== undefined) {
+    upsert.run(
+      'rent_ratio_target_x100',
+      String(Math.max(50, Math.round(data.rent_ratio_target_x100)))
+    )
+  }
+  if (data.reserve_target_months !== undefined) {
+    upsert.run('reserve_target_months', String(Math.max(1, Math.round(data.reserve_target_months))))
+  }
+  return getLivingExpensesSettings()
+}
+
 export function getAppMetaValue(key: string): string | null {
-  const row = getDb().prepare('SELECT value FROM app_meta WHERE key = ?').get(key) as { value: string } | undefined
+  const row = getDb().prepare('SELECT value FROM app_meta WHERE key = ?').get(key) as
+    | { value: string }
+    | undefined
   return typeof row?.value === 'string' ? row.value : null
 }
 
@@ -1815,16 +2478,90 @@ export function getAllCategoryRules(): CategoryMappingRule[] {
     .map(rowToCategoryRule)
 }
 
+export function getImportTransactionRules(provider?: ImportRuleProvider): ImportTransactionRule[] {
+  const db = getDb()
+  if (provider) {
+    return db
+      .prepare(
+        'SELECT * FROM import_transaction_rules WHERE provider = ? ORDER BY priority DESC, id ASC'
+      )
+      .all(provider)
+      .map(rowToImportTransactionRule)
+  }
+  return db
+    .prepare('SELECT * FROM import_transaction_rules ORDER BY provider ASC, priority DESC, id ASC')
+    .all()
+    .map(rowToImportTransactionRule)
+}
+
+export function createImportTransactionRule(
+  data: Partial<ImportTransactionRule>
+): ImportTransactionRule {
+  const result = getDb()
+    .prepare(
+      `INSERT INTO import_transaction_rules (provider, match_text, mapped_category, priority, created_at)
+       VALUES (?, ?, ?, ?, ?)`
+    )
+    .run(
+      data.provider ?? 'capital_one',
+      data.match_text ?? '',
+      data.mapped_category ?? 'Uncategorized',
+      data.priority ?? 0,
+      now()
+    )
+  return getImportTransactionRuleById(Number(result.lastInsertRowid))
+}
+
+export function updateImportTransactionRule(
+  id: number,
+  data: Partial<ImportTransactionRule>
+): ImportTransactionRule {
+  const existing = getImportTransactionRuleById(id)
+  getDb()
+    .prepare(
+      `UPDATE import_transaction_rules
+       SET provider = ?, match_text = ?, mapped_category = ?, priority = ?
+       WHERE id = ?`
+    )
+    .run(
+      data.provider ?? existing.provider,
+      data.match_text ?? existing.match_text,
+      data.mapped_category ?? existing.mapped_category,
+      data.priority ?? existing.priority,
+      id
+    )
+  return getImportTransactionRuleById(id)
+}
+
+export function deleteImportTransactionRule(id: number): void {
+  getDb().prepare('DELETE FROM import_transaction_rules WHERE id = ?').run(id)
+}
+
+function getImportTransactionRuleById(id: number): ImportTransactionRule {
+  const row = getDb().prepare('SELECT * FROM import_transaction_rules WHERE id = ?').get(id)
+  if (!row) throw new Error(`Import transaction rule ${id} not found`)
+  return rowToImportTransactionRule(row)
+}
+
 export function createCategoryRule(data: Partial<CategoryMappingRule>): CategoryMappingRule {
   const result = getDb()
     .prepare(
       'INSERT INTO category_mapping_rules (raw_category, description_contains, mapped_category, priority, created_at) VALUES (?, ?, ?, ?, ?)'
     )
-    .run(data.raw_category ?? '', data.description_contains ?? '', data.mapped_category ?? 'Uncategorized', data.priority ?? 0, now())
+    .run(
+      data.raw_category ?? '',
+      data.description_contains ?? '',
+      data.mapped_category ?? 'Uncategorized',
+      data.priority ?? 0,
+      now()
+    )
   return getCategoryRuleById(Number(result.lastInsertRowid))
 }
 
-export function updateCategoryRule(id: number, data: Partial<CategoryMappingRule>): CategoryMappingRule {
+export function updateCategoryRule(
+  id: number,
+  data: Partial<CategoryMappingRule>
+): CategoryMappingRule {
   const existing = getCategoryRuleById(id)
   getDb()
     .prepare(
@@ -1860,12 +2597,16 @@ export function applyRulesToCategory(rawCategory: string, description: string): 
   })
   if (keyword) return keyword.mapped_category
 
-  const exact = rules.find((rule) => rule.raw_category.trim().toLowerCase() === raw && raw.length > 0)
+  const exact = rules.find(
+    (rule) => rule.raw_category.trim().toLowerCase() === raw && raw.length > 0
+  )
   if (exact) return exact.mapped_category
 
   const fuzzy = rules.find((rule) => {
     const candidate = rule.raw_category.trim().toLowerCase()
-    return candidate.length > 0 && raw.length > 0 && (candidate.includes(raw) || raw.includes(candidate))
+    return (
+      candidate.length > 0 && raw.length > 0 && (candidate.includes(raw) || raw.includes(candidate))
+    )
   })
   return fuzzy?.mapped_category ?? null
 }

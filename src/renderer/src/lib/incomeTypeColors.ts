@@ -71,6 +71,18 @@ export function readAllIncomeTypeColorHexes(): HexOverrideMap {
   return readOverrides()
 }
 
+function fallbackIncomeTypeColorHex(type: string): string {
+  const normalized = normalizeTypeKey(type)
+  if (normalized === 'Snappr') return '#059669'
+  if (normalized === 'Thumbtack') return '#d97706'
+  if (normalized === 'Upwork') return '#0284c7'
+  return '#7c3aed'
+}
+
+export function resolveIncomeTypeColorHex(type: string): string {
+  return readIncomeTypeColorHex(type) ?? fallbackIncomeTypeColorHex(type)
+}
+
 function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
   if (!isValidHex6(hex)) return null
   const r = Number.parseInt(hex.slice(1, 3), 16)
@@ -83,12 +95,15 @@ export function incomeTypeChipPresentation(type: string, fallbackClass: string):
   className: string
   style?: { backgroundColor: string; color: string; boxShadow: string }
 } {
-  const hex = readIncomeTypeColorHex(type)
+  const customHex = readIncomeTypeColorHex(type)
+  const hex = customHex ?? fallbackIncomeTypeColorHex(type)
   if (!hex) return { className: fallbackClass }
   const rgb = hexToRgb(hex)
   if (!rgb) return { className: fallbackClass }
   return {
-    className: 'inline-flex h-6 w-fit shrink-0 items-center whitespace-nowrap rounded-full px-2 text-[10px] font-semibold uppercase tracking-[0.06em] ring-1 ring-inset',
+    className: customHex
+      ? 'inline-flex h-6 w-fit shrink-0 items-center whitespace-nowrap rounded-full px-2 text-[10px] font-semibold uppercase tracking-[0.06em] ring-1 ring-inset'
+      : fallbackClass,
     style: {
       backgroundColor: `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.14)`,
       color: hex,

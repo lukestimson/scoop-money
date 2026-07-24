@@ -19,6 +19,8 @@ export type ChatState = {
 const STORAGE_KEY = 'scoop_money_chat_store'
 const ALL_PAGES: PageId[] = [
   'dashboard',
+  'living-expenses',
+  'analytics',
   'expenses-budget',
   'expenses-actual',
   'expenses-summary',
@@ -64,6 +66,8 @@ function normalizeMessage(message: ChatMessage & { timestamp?: number }): ChatMe
 function defaultStore(): Record<PageId, ChatState> {
   return {
     dashboard: emptyState(),
+    'living-expenses': emptyState(),
+    analytics: emptyState(),
     'expenses-budget': emptyState(),
     'expenses-actual': emptyState(),
     'expenses-summary': emptyState(),

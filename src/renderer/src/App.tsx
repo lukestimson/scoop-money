@@ -5,10 +5,25 @@ import { LivingExpenses } from './components/LivingExpenses'
 import { Settings } from './components/Settings'
 import { Transactions } from './components/Transactions'
 import { useAppContext } from './context/AppContext'
-import waxSeal from './assets/scoop-wax-seal.jpg'
 
 export default function App() {
-  const { activeNav, setActiveNav } = useAppContext()
+  const { activeNav, setActiveNav, isDefaultDateLoaded } = useAppContext()
+
+  if (!isDefaultDateLoaded) {
+    return (
+      <div className="flex h-full items-center justify-center bg-zinc-50 dark:bg-zinc-950">
+        <div className="flex flex-col items-center gap-2">
+          <svg className="h-6 w-6 animate-spin text-zinc-500 dark:text-zinc-400" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+          </svg>
+          <div className="text-zinc-500 dark:text-zinc-400 text-xs font-medium tracking-wide">
+            Loading Finances…
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="flex h-full bg-white text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
@@ -22,13 +37,6 @@ export default function App() {
           <NavButton label="Analytics" active={activeNav === 'analytics'} onClick={() => setActiveNav('analytics')} />
           <NavButton label="Settings" active={activeNav === 'settings'} onClick={() => setActiveNav('settings')} />
         </nav>
-        <div className="mt-auto flex w-full px-3 pb-3">
-          <img
-            src={waxSeal}
-            alt="Scoop wax seal"
-            className="w-full rounded-xl object-contain opacity-95 shadow-[0_12px_20px_-12px_rgba(15,23,42,0.75)]"
-          />
-        </div>
       </aside>
       <main className="ml-[220px] h-full flex-1 bg-white dark:bg-zinc-950">
         {activeNav === 'dashboard' ? <Dashboard /> : null}

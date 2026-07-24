@@ -6,15 +6,21 @@ import { useAppContext } from '../context/AppContext'
 import {
   BUDGET_CATEGORY_SORT_KEY,
   BUDGET_PERIOD_KEY,
+  isParentalGovBudgetLine,
+  lineMonthlyForAidFilters,
+  loadStoredBudgetAidFilters,
   type BudgetCategorySortKey,
   type BudgetDisplayPeriod,
+  type BudgetAidFilter,
   getStoredBudgetCategorySort,
   getStoredBudgetPeriod,
   loadStoredBudgetCategoryOrder,
   saveStoredBudgetCategoryOrder,
+  saveStoredBudgetAidFilters,
   scaleMonthlyAmountToPeriod
 } from '../lib/budget'
 import { formatCurrency, parseCurrencyInput } from '../lib/currency'
+import { BudgetAidIndicators, GovAidIcon, ParentalAidIcon } from './BudgetAidIndicators'
 import { ChatBox } from './ChatBox'
 import { ListSectionSearchBar, type ListSearchPhase } from './ListSectionSearchBar'
 
@@ -46,7 +52,6 @@ const SORT_OPTIONS: ReadonlyArray<{ id: BudgetCategorySortKey; label: string }> 
 
 const CUSTOM_CATEGORIES_KEY = 'scoop_budget_custom_categories'
 const HIDDEN_CATEGORIES_KEY = 'scoop_budget_hidden_categories'
-const AID_FILTERS_KEY = 'scoop_budget_aid_filters'
 
 interface DragState {
   category: string
@@ -65,16 +70,6 @@ function computeDragTarget(ds: DragState, count: number): number {
     if (ds.rowMidpoints[i] < draggedCenter) above++
   }
   return above
-}
-
-function lineMonthlyForAidMode(line: BudgetLineItem, aidActive: Set<string>): number {
-  if (aidActive.has('parental') && line.support_scope === 'parental') return 0
-  if (aidActive.has('government') && line.support_scope === 'government') return 0
-  return line.monthly_amount
-}
-
-function isParentalGovLine(line: BudgetLineItem): boolean {
-  return line.section === 'Parental & Gov Help'
 }
 
 function budgetCategoryMatchesPhase2(
@@ -96,9 +91,9 @@ function budgetCategoryMatchesPhase2(
   const digits = q.replace(/[^\d.-]/g, '')
   if (digits.length > 0 && (plain.includes(digits) || formatted.includes(digits))) return true
 
-  const lines = lineItems.filter((l) => l.category === category && !isParentalGovLine(l))
+  const lines = lineItems.filter((l) => l.category === category && !isParentalGovBudgetLine(l))
   for (const line of lines) {
-    const monthly = lineMonthlyForAidMode(line, aidFilters)
+    const monthly = lineMonthlyForAidFilters(line, aidFilters)
     const scaledLine = scaleMonthlyAmountToPeriod(monthly, period)
     const blob = [
       line.label,
@@ -128,12 +123,6 @@ function loadHiddenCategories(): string[] {
   return []
 }
 function saveHiddenCategoriesList(cats: string[]): void { localStorage.setItem(HIDDEN_CATEGORIES_KEY, JSON.stringify(cats)) }
-
-function loadAidFilters(): Set<'parental' | 'government'> {
-  try { const r = localStorage.getItem(AID_FILTERS_KEY); if (r) { const p = JSON.parse(r); if (Array.isArray(p)) return new Set(p.filter((x: string) => x === 'parental' || x === 'government')) } } catch { /* */ }
-  return new Set()
-}
-function saveAidFilters(filters: Set<string>): void { localStorage.setItem(AID_FILTERS_KEY, JSON.stringify([...filters])) }
 
 function lineToPartial(line: BudgetLineItem): Partial<BudgetLineItem> {
   return { category: line.category, section: line.section, label: line.label, monthly_amount: line.monthly_amount, annual_amount: line.annual_amount, notes: line.notes, support_scope: line.support_scope, is_need: line.is_need, source_sheet: line.source_sheet, source_row: line.source_row }
@@ -220,9 +209,20 @@ function FilterPill({ label, active, tone, onClick }: { label: string; active: b
 // Main Budget component
 // ---------------------------------------------------------------------------
 
-export function Budget() {
+export function Budget({
+  period: controlledPeriod,
+  onPeriodChange,
+  onAidFiltersChange,
+  embedded = false
+}: {
+  period?: BudgetDisplayPeriod
+  onPeriodChange?: (period: BudgetDisplayPeriod) => void
+  onAidFiltersChange?: (filters: Set<BudgetAidFilter>) => void
+  embedded?: boolean
+} = {}) {
   const { dataVersion, bumpDataVersion } = useAppContext()
-  const [period, setPeriod] = useState<BudgetDisplayPeriod>(() => getStoredBudgetPeriod())
+  const [localPeriod, setLocalPeriod] = useState<BudgetDisplayPeriod>(() => getStoredBudgetPeriod())
+  const period = controlledPeriod ?? localPeriod
   const [lineItems, setLineItems] = useState<BudgetLineItem[]>([])
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
   const [needFilter, setNeedFilter] = useState<LineNeedFilter>('all')
@@ -239,7 +239,7 @@ export function Budget() {
   const [editingCategoryName, setEditingCategoryName] = useState<string | null>(null)
   const [categoryNameDraft, setCategoryNameDraft] = useState('')
   const [contextMenu, setContextMenu] = useState<{ category: string; x: number; y: number; confirming?: boolean } | null>(null)
-  const [aidFilters, setAidFilters] = useState<Set<'parental' | 'government'>>(() => loadAidFilters())
+  const [aidFilters, setAidFilters] = useState<Set<BudgetAidFilter>>(() => loadStoredBudgetAidFilters())
   const [budgetSearchFieldOpen, setBudgetSearchFieldOpen] = useState(false)
   const [budgetSearchQuery, setBudgetSearchQuery] = useState('')
   const [budgetSearchPhase, setBudgetSearchPhase] = useState<ListSearchPhase>(1)
@@ -253,7 +253,7 @@ export function Budget() {
   const rowRefsMap = useRef(new Map<string, HTMLDivElement>())
   const sortRef = useRef<HTMLDivElement>(null)
 
-  useEffect(() => { localStorage.setItem(BUDGET_PERIOD_KEY, period) }, [period])
+  useEffect(() => { localStorage.setItem(BUDGET_PERIOD_KEY, localPeriod) }, [localPeriod])
   useEffect(() => { localStorage.setItem(BUDGET_CATEGORY_SORT_KEY, categorySort) }, [categorySort])
 
   useEffect(() => {
@@ -267,7 +267,10 @@ export function Budget() {
   useEffect(() => { saveStoredBudgetCategoryOrder(customOrder) }, [customOrder])
   useEffect(() => { saveCustomCategories(userCategories) }, [userCategories])
   useEffect(() => { saveHiddenCategoriesList(Array.from(hiddenCategories)) }, [hiddenCategories])
-  useEffect(() => { saveAidFilters(aidFilters) }, [aidFilters])
+  useEffect(() => { saveStoredBudgetAidFilters(aidFilters) }, [aidFilters])
+  useEffect(() => {
+    if (onAidFiltersChange) onAidFiltersChange(new Set(aidFilters))
+  }, [aidFilters, onAidFiltersChange])
   useEffect(() => { window.api.getBudgetLineItems().then(setLineItems) }, [dataVersion])
 
   // Close context menu on any pointer down outside
@@ -308,6 +311,11 @@ export function Budget() {
   function pushUndo(action: UndoAction): void {
     undoStackRef.current.push(action)
     setHasUndoActions(true)
+  }
+
+  function setPeriod(nextPeriod: BudgetDisplayPeriod): void {
+    if (onPeriodChange) onPeriodChange(nextPeriod)
+    if (controlledPeriod === undefined) setLocalPeriod(nextPeriod)
   }
 
   async function executeUndo(action: UndoAction): Promise<void> {
@@ -352,7 +360,7 @@ export function Budget() {
 
   // --- Aid filter toggle ---
 
-  function toggleAidFilter(scope: 'parental' | 'government'): void {
+  function toggleAidFilter(scope: BudgetAidFilter): void {
     setAidFilters((prev) => {
       const next = new Set(prev)
       if (next.has(scope)) next.delete(scope)
@@ -374,7 +382,7 @@ export function Budget() {
       if (!seen.has(cat) && cat.trim()) { combined.push(cat); seen.add(cat) }
     }
     lineItems.forEach((line) => {
-      if (line.category.trim() && !seen.has(line.category) && !isParentalGovLine(line)) { combined.push(line.category); seen.add(line.category) }
+      if (line.category.trim() && !seen.has(line.category) && !isParentalGovBudgetLine(line)) { combined.push(line.category); seen.add(line.category) }
     })
     return combined
   }, [hiddenCategories, lineItems, userCategories])
@@ -384,7 +392,7 @@ export function Budget() {
   const linesByCategory = useMemo(() => {
     const map = new Map<string, BudgetLineItem[]>()
     lineItems.forEach((line) => {
-      if (!line.category.trim() || isParentalGovLine(line)) return
+      if (!line.category.trim() || isParentalGovBudgetLine(line)) return
       if (needFilter === 'needs' && !line.is_need) return
       if (needFilter === 'wants' && line.is_need) return
       const list = map.get(line.category) ?? []
@@ -397,8 +405,8 @@ export function Budget() {
   const categoryMonthlyTotals = useMemo(() => {
     const totals = new Map<string, number>()
     for (const category of allCategoryKeys) {
-      const lines = lineItems.filter((l) => l.category === category && !isParentalGovLine(l) && (needFilter === 'all' || (needFilter === 'needs' ? l.is_need : !l.is_need)))
-      totals.set(category, lines.reduce((acc, l) => acc + lineMonthlyForAidMode(l, aidFilters), 0))
+      const lines = lineItems.filter((l) => l.category === category && !isParentalGovBudgetLine(l) && (needFilter === 'all' || (needFilter === 'needs' ? l.is_need : !l.is_need)))
+      totals.set(category, lines.reduce((acc, l) => acc + lineMonthlyForAidFilters(l, aidFilters), 0))
     }
     return totals
   }, [allCategoryKeys, aidFilters, lineItems, needFilter])
@@ -411,19 +419,19 @@ export function Budget() {
 
   const categoryKindByCategory = useMemo(() => {
     const map = new Map<string, ReturnType<typeof categoryNeedKindFromLines>>()
-    for (const category of allCategoryKeys) map.set(category, categoryNeedKindFromLines(lineItems.filter((l) => l.category === category && !isParentalGovLine(l))))
+    for (const category of allCategoryKeys) map.set(category, categoryNeedKindFromLines(lineItems.filter((l) => l.category === category && !isParentalGovBudgetLine(l))))
     return map
   }, [allCategoryKeys, lineItems])
 
   const categoriesWithParental = useMemo(() => {
     const set = new Set<string>()
-    lineItems.forEach((l) => { if (l.support_scope === 'parental' && !isParentalGovLine(l)) set.add(l.category) })
+    lineItems.forEach((l) => { if (l.support_scope === 'parental' && !isParentalGovBudgetLine(l)) set.add(l.category) })
     return set
   }, [lineItems])
 
   const categoriesWithGov = useMemo(() => {
     const set = new Set<string>()
-    lineItems.forEach((l) => { if (l.support_scope === 'government' && !isParentalGovLine(l)) set.add(l.category) })
+    lineItems.forEach((l) => { if (l.support_scope === 'government' && !isParentalGovBudgetLine(l)) set.add(l.category) })
     return set
   }, [lineItems])
 
@@ -526,7 +534,7 @@ export function Budget() {
     if (pendingDeletes.size > 0) {
       const batchActions: UndoAction[] = []
       for (const category of pendingDeletes) {
-        const lines = lineItems.filter((l) => l.category === category && !isParentalGovLine(l))
+        const lines = lineItems.filter((l) => l.category === category && !isParentalGovBudgetLine(l))
         const linesData = lines.map(lineToPartial)
         lines.forEach((l) => void window.api.deleteBudgetLineItem(l.id))
         const wasBuiltIn = BUDGET_CATEGORY_ALLOWLIST.has(category)
@@ -570,7 +578,7 @@ export function Budget() {
 
   async function deleteCategoryImmediate(category: string): Promise<void> {
     setContextMenu(null)
-    const lines = lineItems.filter((l) => l.category === category && !isParentalGovLine(l))
+    const lines = lineItems.filter((l) => l.category === category && !isParentalGovBudgetLine(l))
     const linesData = lines.map(lineToPartial)
     for (const l of lines) await window.api.deleteBudgetLineItem(l.id)
     const wasBuiltIn = BUDGET_CATEGORY_ALLOWLIST.has(category)
@@ -645,10 +653,17 @@ export function Budget() {
     return ''
   }
 
+  function categoryAidFilters(category: string): Set<BudgetAidFilter> {
+    const filters = new Set<BudgetAidFilter>()
+    if (aidFilters.has('parental') && categoriesWithParental.has(category)) filters.add('parental')
+    if (aidFilters.has('government') && categoriesWithGov.has(category)) filters.add('government')
+    return filters
+  }
+
   // --- Render ---
 
   return (
-    <div className="flex flex-col bg-white dark:bg-zinc-950">
+    <div className={`flex flex-col ${embedded ? '' : 'bg-white dark:bg-zinc-950'}`}>
       <div className="flex-1 px-4 py-6 md:px-8">
         <div className="mb-4 md:hidden">
           <BudgetFilterRail needFilter={needFilter} onNeedFilter={setNeedFilter} />
@@ -665,7 +680,10 @@ export function Budget() {
             <div>
               <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">Budget</h1>
               <div className="mt-2 text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400">Total</div>
-              <div className="mt-1 text-2xl font-semibold tracking-tight text-zinc-900 tabular-nums dark:text-zinc-100">{formatCurrency(totalBudgetScaled)}</div>
+              <div className="mt-1 flex items-center gap-2 text-2xl font-semibold tracking-tight text-zinc-900 tabular-nums dark:text-zinc-100">
+                {formatCurrency(totalBudgetScaled)}
+                <BudgetAidIndicators filters={aidFilters} />
+              </div>
             </div>
             <div className="flex flex-col items-end gap-2">
               <div className="flex flex-wrap items-center gap-3">
@@ -780,7 +798,8 @@ export function Budget() {
                 const isDragging = dragRef.current?.category === category
                 const isMarkedForDelete = pendingDeletes.has(category)
                 const isEditingName = editingCategoryName === category
-                const aidBorder = categoryAidBorderClass(category)
+	                const aidBorder = categoryAidBorderClass(category)
+	                const categoryAid = categoryAidFilters(category)
                 return (
                   <div
                     key={category}
@@ -820,7 +839,10 @@ export function Budget() {
                             <ChevronIcon expanded={isExpanded} />
                           </button>
                           <span className="flex justify-center"><NeedTypeChip kind={catKind} /></span>
-                          <span className="text-right font-medium tabular-nums text-zinc-900 dark:text-zinc-100">{formatCurrency(displayTotal)}</span>
+	                          <span className="flex items-center justify-end gap-1.5 text-right font-medium tabular-nums text-zinc-900 dark:text-zinc-100">
+                              {formatCurrency(displayTotal)}
+                              <BudgetAidIndicators filters={categoryAid} />
+                            </span>
                           <div className="flex shrink-0 justify-end gap-1">
                             {isMarkedForDelete ? (
                               <button type="button" onClick={() => setPendingDeletes((p) => { const n = new Set(p); n.delete(category); return n })} className="flex h-6 w-6 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-white hover:text-zinc-700 dark:hover:bg-zinc-900 dark:hover:text-zinc-200" aria-label="Undo delete"><UndoIcon /></button>
@@ -854,7 +876,10 @@ export function Budget() {
                           )}
                           <span />
                           <span className="flex justify-center"><NeedTypeChip kind={catKind} /></span>
-                          <span className="text-right font-medium tabular-nums text-zinc-900 dark:text-zinc-100">{formatCurrency(displayTotal)}</span>
+	                          <span className="flex items-center justify-end gap-1.5 text-right font-medium tabular-nums text-zinc-900 dark:text-zinc-100">
+                              {formatCurrency(displayTotal)}
+                              <BudgetAidIndicators filters={categoryAid} />
+                            </span>
                           <span className="flex w-[56px] items-center justify-end gap-1 text-zinc-400 dark:text-zinc-500">
                             {isEditingName && (
                               <button type="button" onClick={(e) => { e.stopPropagation(); void commitCategoryRename(category) }} className="flex h-6 w-6 items-center justify-center rounded-full text-emerald-600 transition-colors hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-950/30" aria-label="Confirm edit"><CheckIcon /></button>
@@ -940,9 +965,11 @@ export function Budget() {
         </div>
       ) : null}
 
-      <div className="shrink-0 border-t border-zinc-200 bg-white px-4 pb-2 pt-1 md:px-8 dark:border-zinc-800 dark:bg-zinc-950">
-        <ChatBox pageId="expenses-budget" fullWidth />
-      </div>
+      {embedded ? null : (
+        <div className="shrink-0 border-t border-zinc-200 bg-white px-4 pb-2 pt-1 md:px-8 dark:border-zinc-800 dark:bg-zinc-950">
+          <ChatBox pageId="expenses-budget" fullWidth />
+        </div>
+      )}
     </div>
   )
 }
@@ -1147,24 +1174,8 @@ function UndoIcon() {
   return (<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 7h6a4 4 0 0 1 0 8H7" /><path d="M6 4 3 7l3 3" /></svg>)
 }
 function ParentalIcon() {
-  return (
-    <svg width="14" height="10" viewBox="0 0 14 10" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="text-orange-500 dark:text-orange-400">
-      <circle cx="4" cy="2.2" r="1.4" />
-      <path d="M1.5 9c0-1.8 1.2-2.8 2.5-2.8s2.5 1 2.5 2.8" />
-      <circle cx="10" cy="2.2" r="1.4" />
-      <path d="M7.5 9c0-1.8 1.2-2.8 2.5-2.8s2.5 1 2.5 2.8" />
-    </svg>
-  )
+  return <ParentalAidIcon />
 }
 function GovIcon() {
-  return (
-    <svg width="12" height="10" viewBox="0 0 12 10" fill="none" stroke="currentColor" strokeWidth="1.0" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="text-amber-700 dark:text-amber-500">
-      <path d="M6 0.8 L1.5 3.5 H10.5 Z" />
-      <line x1="1.5" y1="9" x2="10.5" y2="9" />
-      <line x1="3" y1="3.5" x2="3" y2="9" />
-      <line x1="5" y1="3.5" x2="5" y2="9" />
-      <line x1="7" y1="3.5" x2="7" y2="9" />
-      <line x1="9" y1="3.5" x2="9" y2="9" />
-    </svg>
-  )
+  return <GovAidIcon />
 }

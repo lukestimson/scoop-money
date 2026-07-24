@@ -17,6 +17,7 @@ import {
   deleteBudgetLineItem,
   deleteCategoryRule,
   deleteIncomeEntry,
+  deleteImportTransactionRule,
   deleteTransactions,
   createExpectedIncomeEntry,
   deleteTransaction,
@@ -30,8 +31,11 @@ import {
   getAllTransactions,
   clearImportedFile,
   clearIncomeCandidateFlags,
+  createImportTransactionRule,
   getImportedFiles,
+  getImportTransactionRules,
   getIncomeTaxSettings,
+  getLivingExpensesSettings,
   initDatabase,
   recategorizeAllTransactions,
   updateAccount,
@@ -40,11 +44,21 @@ import {
   updateCategoryRule,
   updateExpectedIncomeEntry,
   updateIncomeEntry,
+  updateImportTransactionRule,
   updateIncomeTaxSettings,
+  updateLivingExpensesSettings,
   updateTransaction
 } from './database'
 import { importTransactionsFromFile } from './importer'
-import { getBackupDirectory, getBackupRetention, initBackups, listBackups, runBackup, setBackupRetention } from './backup'
+import {
+  getBackupDirectory,
+  getBackupRetention,
+  initBackups,
+  listBackups,
+  runBackup,
+  setBackupRetention
+} from './backup'
+import { startAgentBridge } from './agentBridge'
 import {
   chatWithMoney,
   getAiPromptSettings,
@@ -68,6 +82,12 @@ app.setPath('userData', join(app.getPath('appData'), 'scoop-money'))
 
 const BACKUP_QUIT_TIMEOUT_MS = 8000
 let quitting = false
+
+function notifyRendererDataMutated(): void {
+  BrowserWindow.getAllWindows().forEach((window) => {
+    if (!window.isDestroyed()) window.webContents.send('money:dataMutated')
+  })
+}
 
 function devDockIconPaths(): string[] {
   const viteAsset = typeof icon === 'string' ? icon : ''
@@ -142,10 +162,16 @@ function createWindow(): void {
     const key = input.key
     if (key === '+' || key === '=') {
       event.preventDefault()
-      mainWindow.webContents.send('ui:textScaleCommand', { kind: 'delta', delta: 0.025 })
+      mainWindow.webContents.send('ui:textScaleCommand', {
+        kind: 'delta',
+        delta: 0.025
+      })
     } else if (key === '-' || key === '_') {
       event.preventDefault()
-      mainWindow.webContents.send('ui:textScaleCommand', { kind: 'delta', delta: -0.025 })
+      mainWindow.webContents.send('ui:textScaleCommand', {
+        kind: 'delta',
+        delta: -0.025
+      })
     } else if (key === '0') {
       event.preventDefault()
       mainWindow.webContents.send('ui:textScaleCommand', { kind: 'reset' })
@@ -154,7 +180,9 @@ function createWindow(): void {
 }
 
 function registerIpcHandlers(): void {
-  ipcMain.handle('transactions:getAll', (_event, filters?: TransactionFilters) => getAllTransactions(filters))
+  ipcMain.handle('transactions:getAll', (_event, filters?: TransactionFilters) =>
+    getAllTransactions(filters)
+  )
   ipcMain.handle('transactions:create', (_event, data) => createTransaction(data))
   ipcMain.handle('transactions:update', (_event, id: number, data) => updateTransaction(id, data))
   ipcMain.handle('transactions:delete', (_event, id: number) => deleteTransaction(id))
@@ -163,11 +191,19 @@ function registerIpcHandlers(): void {
   ipcMain.handle('transactions:import', (_event, filePath: string, accountId: number) =>
     importTransactionsFromFile(filePath, accountId)
   )
-  ipcMain.handle('imports:getAll', (_event, filters?: { start?: number; end?: number }) => getImportedFiles(filters))
-  ipcMain.handle('imports:clear', (_event, fileId: number) => ({ transactions: clearImportedFile(fileId) }))
-  ipcMain.handle('transactions:clearIncomeFlags', (_event, ids: number[]) => clearIncomeCandidateFlags(ids))
+  ipcMain.handle('imports:getAll', (_event, filters?: { start?: number; end?: number }) =>
+    getImportedFiles(filters)
+  )
+  ipcMain.handle('imports:clear', (_event, fileId: number) => ({
+    transactions: clearImportedFile(fileId)
+  }))
+  ipcMain.handle('transactions:clearIncomeFlags', (_event, ids: number[]) =>
+    clearIncomeCandidateFlags(ids)
+  )
 
-  ipcMain.handle('budget:getAll', (_event, budgetType?: BudgetType) => getAllBudgetItems(budgetType))
+  ipcMain.handle('budget:getAll', (_event, budgetType?: BudgetType) =>
+    getAllBudgetItems(budgetType)
+  )
   ipcMain.handle('budgetLines:getAll', () => getAllBudgetLineItems())
   ipcMain.handle('budget:create', (_event, data) => createBudgetItem(data))
   ipcMain.handle('budget:update', (_event, id: number, data) => updateBudgetItem(id, data))
@@ -187,16 +223,28 @@ function registerIpcHandlers(): void {
   ipcMain.handle('income:delete', (_event, id: number) => deleteIncomeEntry(id))
   ipcMain.handle('incomeExpected:getAll', () => getAllExpectedIncomeEntries())
   ipcMain.handle('incomeExpected:create', (_event, data) => createExpectedIncomeEntry(data))
-  ipcMain.handle('incomeExpected:update', (_event, id: number, data) => updateExpectedIncomeEntry(id, data))
+  ipcMain.handle('incomeExpected:update', (_event, id: number, data) =>
+    updateExpectedIncomeEntry(id, data)
+  )
   ipcMain.handle('incomeExpected:delete', (_event, id: number) => deleteExpectedIncomeEntry(id))
   ipcMain.handle('incomeTax:getSettings', () => getIncomeTaxSettings())
   ipcMain.handle('incomeTax:updateSettings', (_event, data) => updateIncomeTaxSettings(data))
+  ipcMain.handle('livingExpenses:getSettings', () => getLivingExpensesSettings())
+  ipcMain.handle('livingExpenses:updateSettings', (_event, data) =>
+    updateLivingExpensesSettings(data)
+  )
 
   ipcMain.handle('rules:getAll', () => getAllCategoryRules())
   ipcMain.handle('rules:create', (_event, data) => createCategoryRule(data))
   ipcMain.handle('rules:update', (_event, id: number, data) => updateCategoryRule(id, data))
   ipcMain.handle('rules:delete', (_event, id: number) => deleteCategoryRule(id))
   ipcMain.handle('rules:recategorizeAll', () => recategorizeAllTransactions())
+  ipcMain.handle('importRules:getAll', (_event, provider) => getImportTransactionRules(provider))
+  ipcMain.handle('importRules:create', (_event, data) => createImportTransactionRule(data))
+  ipcMain.handle('importRules:update', (_event, id: number, data) =>
+    updateImportTransactionRule(id, data)
+  )
+  ipcMain.handle('importRules:delete', (_event, id: number) => deleteImportTransactionRule(id))
 
   ipcMain.handle('ai:chat', (_event, pageId: string, message: string, history, attachments) =>
     chatWithMoney(pageId, message, history, attachments ?? [])
@@ -233,6 +281,7 @@ app.whenReady().then(() => {
   initAiPersistence(app.getPath('userData'))
   initBackups(app.getPath('userData'))
   registerIpcHandlers()
+  startAgentBridge(app.getPath('userData'), notifyRendererDataMutated)
   getAvailableModels().catch(() => undefined)
   createWindow()
 

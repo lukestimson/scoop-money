@@ -8,6 +8,7 @@ import dotenv from 'dotenv'
 import type { ChatCompletionContentPart, ChatCompletionMessageParam, ChatCompletionTool } from 'openai/resources/chat/completions'
 import type { AiPromptSettings, AiProvider, AiProviderState, ChatAttachment, ChatMessage, ChatResult, ModelInfo, SetModelIdResult } from '../types/money'
 import { parseLocalDateToUnix } from '../types/dateParsing'
+import { accumulateAnthropicUsage, accumulateOpenAiUsage, createUsageAccumulator, toUsageSummary } from './aiUsageCost'
 import {
   createBudgetLineItem,
   createIncomeEntry,
@@ -22,6 +23,7 @@ import {
   getAllTransactions,
   setAppMetaValue,
   updateBudgetLineItem,
+  updateIncomeEntry,
   updateTransaction
 } from './database'
 
@@ -60,7 +62,7 @@ const DEFAULT_AI_PROMPT_SETTINGS: AiPromptSettings = {
   general_system_prompt:
     'You are a personal finance assistant for Scoop Money. You have access to the user\'s transaction history, budget settings, income entries, and precomputed monthly/category summaries. Help them understand spending, budget variance, income trends, month-over-month changes, and net cash flow. {accuracy_instruction}\n\n<money_data>{money_data}</money_data>',
   income_actual_system_prompt:
-    'You are helping log photography income. When the user pastes shoot information, extract: shoot name, the main POC or client name from the shoot title or description, income type/platform when mentioned (for example Snappr, Thumbtack, Upwork, or Stimsonphoto), date, amount, and any notes. Put the POC/client name in company and the platform or channel in income_type. For notes, store plain text only: one line per bullet, with no leading *, •, -, or other bullet markers because the app renders bullets in the UI. Call create_income_entry for each shoot. If multiple shoots are pasted, create multiple entries. Confirm what was created with a brief summary. {accuracy_instruction}\n\n<money_data>{money_data}</money_data>',
+    'You are helping log photography income. When the user pastes shoot information, extract: shoot name, the main POC or client name from the shoot title or description, income type/platform when mentioned (for example Snappr, Thumbtack, Upwork, or Stimsonphoto), date, amount, tip when present, and any notes. Put the POC/client name in company and the platform or channel in income_type. If the platform is not clearly specified, set income_type to Stimsonphoto. Payment methods and payout rails such as Venmo, Zelle, cash, check, bank transfer, direct deposit, PayPal, or Apple Cash are not income types; keep those in notes instead. If a tip amount is mentioned, always send it in tip or tip_cents; do not leave tip amounts only inside notes. For notes, store plain text only: one line per bullet, with no leading *, •, -, or other bullet markers because the app renders bullets in the UI. Entries with similar or identical shoot names on different dates are still separate rows. Cancellation fees and completed shoots must stay separate, with their own amount and their own notes. Never copy a cancellation fee or cancellation note onto a completed shoot unless the source explicitly says that row was cancelled. Prefer create_income_entries_batch when multiple shoots are pasted. Confirm what was created with a brief summary. {accuracy_instruction}\n\n<money_data>{money_data}</money_data>',
   accuracy_instruction:
     'Use as few tokens as practical while preserving numeric accuracy. Money values in tool/data payloads are integer cents; compute from cents, then present dollars. For financial analysis, state the period and assumptions used, do not invent missing data, and prefer compact tables or bullets over long prose.'
 }
@@ -227,15 +229,18 @@ async function chatWithAnthropic(
   const messages: Anthropic.MessageParam[] = chatMessagesToTurns(history)
   messages.push({ role: 'user', content: buildUserContent(message, attachments) })
   let dataChanged = false
+  let usageAcc = createUsageAccumulator()
+  const tools = getAnthropicToolsForRequest(pageId, message, attachments)
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     const response = await client.messages.create({
       model: currentModels.anthropic,
       max_tokens: 1400,
       system: buildSystemPrompt(pageId),
-      tools: ANTHROPIC_TOOLS,
+      tools,
       messages
     } as Anthropic.MessageCreateParamsNonStreaming)
+    usageAcc = accumulateAnthropicUsage(usageAcc, currentModels.anthropic, response.usage)
 
     messages.push({ role: 'assistant', content: response.content as never })
     const toolBlocks = response.content.filter((block) => block.type === 'tool_use')
@@ -244,13 +249,14 @@ async function chatWithAnthropic(
         .filter((block) => block.type === 'text')
         .map((block) => block.text)
         .join('\n')
-      return { text: text || 'Done.', dataChanged }
+      return { text: text || 'Done.', dataChanged, usage: toUsageSummary(usageAcc) }
     }
 
     const toolResults = toolBlocks.map((block) => {
       const result = executeTool(block.name, block.input)
       if (
         block.name === 'create_income_entry' ||
+        block.name === 'create_income_entries_batch' ||
         block.name === 'update_income_entry' ||
         block.name === 'create_transaction' ||
         block.name === 'update_transaction' ||
@@ -279,30 +285,33 @@ async function chatWithOpenAi(
   attachments: ChatAttachment[] = []
 ): Promise<ChatResult> {
   const client = getOpenAiClient()
+  const tools = getOpenAiToolsForRequest(pageId, message, attachments)
   const messages: ChatCompletionMessageParam[] = [
     { role: 'developer', content: buildSystemPrompt(pageId) },
     ...openAiMessagesToTurns(history),
     { role: 'user', content: buildOpenAiUserContent(message, attachments) }
   ]
   let dataChanged = false
+  let usageAcc = createUsageAccumulator()
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     const response = await client.chat.completions.create({
       model: currentModels.openai,
       max_completion_tokens: 1400,
-      tools: OPENAI_TOOLS,
+      tools,
       tool_choice: 'auto',
       messages
     })
+    usageAcc = accumulateOpenAiUsage(usageAcc, currentModels.openai, response.usage)
     const choice = response.choices[0]?.message
-    if (!choice) return { text: 'No response returned.', dataChanged }
+    if (!choice) return { text: 'No response returned.', dataChanged, usage: toUsageSummary(usageAcc) }
     messages.push({
       role: 'assistant',
       content: choice.content ?? null,
       tool_calls: choice.tool_calls
     })
     if (!choice.tool_calls || choice.tool_calls.length === 0) {
-      return { text: choice.content || 'Done.', dataChanged }
+      return { text: choice.content || 'Done.', dataChanged, usage: toUsageSummary(usageAcc) }
     }
 
     for (const call of choice.tool_calls) {
@@ -310,6 +319,7 @@ async function chatWithOpenAi(
       const result = executeTool(call.function.name, parseToolArguments(call.function.arguments))
       if (
         call.function.name === 'create_income_entry' ||
+        call.function.name === 'create_income_entries_batch' ||
         call.function.name === 'update_income_entry' ||
         call.function.name === 'create_transaction' ||
         call.function.name === 'update_transaction' ||
@@ -463,6 +473,10 @@ function buildSystemPrompt(pageId: string): string {
     rendered +=
       '\n\nYou are on the Transactions page. You can create and update expense transactions with create_transaction and update_transaction. Sign convention: expenses/outflows/spending are negative integer cents; reimbursements, refunds, statement credits, and offsets are positive integer cents because they reduce spending. Pass amount as dollars (-64.84 for spending, 64.84 for an offset) or pass amount_cents as integer cents (-6484 for spending, 6484 for an offset); never pass integer cents in amount. If the user provides positive dollar values while describing expenses, use kind=expense so the tool stores them as negative spending. Pass plain calendar dates exactly as the user provided them; date-only values are stored as local calendar dates, not UTC. Use the account name when known (Capital One, Venmo, EBT, Chase), category should match budget categories when possible, and source should usually be manual for AI-created transactions.'
   }
+  if (pageId === 'income' || pageId === 'income-actual') {
+    rendered +=
+      '\n\nYou are on the Income page. During imports or pasted shoot logging, create new rows only. Do not update an existing income entry unless the user explicitly asks to edit an existing row and provides the exact entry id. Repeated or similar shoot names across different dates are separate income entries, not updates to prior rows.'
+  }
   return rendered
 }
 
@@ -602,7 +616,8 @@ function executeTool(name: string, input: unknown): unknown {
   if (name === 'create_income_entry') {
     const normalizedDate = normalizeDate(data.date)
     const normalizedAmount = data.amount_cents !== undefined ? Math.round(Number(data.amount_cents)) : normalizeAmount(data.amount)
-    const normalizedTip = data.tip_cents !== undefined ? Math.round(Number(data.tip_cents)) : (data.tip !== undefined && data.tip !== null ? normalizeAmount(data.tip) : null)
+    const notes = String(data.notes ?? '')
+    const normalizedTip = resolveIncomeTip(data.tip, data.tip_cents, notes)
     
     const shootName = String(data.shoot_name ?? '')
     const existing = getAllIncomeEntries().find(e => e.date === normalizedDate && e.amount === normalizedAmount && e.shoot_name === shootName)
@@ -615,9 +630,46 @@ function executeTool(name: string, input: unknown): unknown {
       date: normalizedDate,
       amount: normalizedAmount,
       tip: normalizedTip,
-      notes: String(data.notes ?? '')
+      notes
     })
     return { success: true, id: row.id }
+  }
+  if (name === 'create_income_entries_batch') {
+    const rawEntries = Array.isArray(data.entries) ? data.entries : []
+    if (rawEntries.length === 0) return { error: 'entries must be a non-empty array' }
+
+    const created: Array<{ id: number; shoot_name: string; date: number; amount_cents: number }> = []
+    const duplicates: Array<{ id: number; shoot_name: string; date: number; amount_cents: number }> = []
+
+    for (const rawEntry of rawEntries) {
+      if (!rawEntry || typeof rawEntry !== 'object') continue
+      const entry = rawEntry as Record<string, unknown>
+      const normalizedDate = normalizeDate(entry.date)
+      const normalizedAmount = entry.amount_cents !== undefined ? Math.round(Number(entry.amount_cents)) : normalizeAmount(entry.amount)
+      const notes = String(entry.notes ?? '')
+      const normalizedTip = resolveIncomeTip(entry.tip, entry.tip_cents, notes)
+      const shootName = String(entry.shoot_name ?? '')
+      const existing = getAllIncomeEntries().find(
+        (incomeEntry) => incomeEntry.date === normalizedDate && incomeEntry.amount === normalizedAmount && incomeEntry.shoot_name === shootName
+      )
+      if (existing) {
+        duplicates.push({ id: existing.id, shoot_name: existing.shoot_name, date: existing.date, amount_cents: existing.amount })
+        continue
+      }
+
+      const row = createIncomeEntry({
+        shoot_name: shootName,
+        company: String(entry.company ?? ''),
+        income_type: String(entry.income_type ?? ''),
+        date: normalizedDate,
+        amount: normalizedAmount,
+        tip: normalizedTip,
+        notes
+      })
+      created.push({ id: row.id, shoot_name: row.shoot_name, date: row.date, amount_cents: row.amount })
+    }
+
+    return { success: true, created_count: created.length, duplicate_count: duplicates.length, created, duplicates }
   }
   if (name === 'update_income_entry') {
     const id = Number(data.id)
@@ -634,6 +686,10 @@ function executeTool(name: string, input: unknown): unknown {
       patch.tip = data.tip_cents !== undefined ? Math.round(Number(data.tip_cents)) : (data.tip === null ? null : normalizeAmount(data.tip))
     }
     if (data.notes !== undefined) patch.notes = String(data.notes)
+    if (patch.tip === undefined && patch.notes) {
+      const inferredTip = inferTipCentsFromNotes(patch.notes)
+      if (inferredTip !== null) patch.tip = inferredTip
+    }
     
     const row = updateIncomeEntry(id, patch)
     return { success: true, id: row.id }
@@ -747,6 +803,30 @@ function normalizeAmount(value: unknown): number {
   return Number.isFinite(parsed) ? Math.round(parsed * 100) : 0
 }
 
+function resolveIncomeTip(tipValue: unknown, tipCentsValue: unknown, notes: string): number | null {
+  if (tipCentsValue !== undefined) return Math.round(Number(tipCentsValue))
+  if (tipValue === null) return null
+  if (tipValue !== undefined) return normalizeAmount(tipValue)
+  return inferTipCentsFromNotes(notes)
+}
+
+function inferTipCentsFromNotes(notes: string): number | null {
+  const text = notes.trim()
+  if (!text) return null
+  const patterns = [
+    /\$\s*([0-9]+(?:\.[0-9]{1,2})?)\s*(?:cash\s+)?tip\b/i,
+    /\$\s*([0-9]+(?:\.[0-9]{1,2})?)\s*was\s+tip\b/i,
+    /\btip\b[^$\n\r]{0,24}\$\s*([0-9]+(?:\.[0-9]{1,2})?)/i
+  ]
+  for (const pattern of patterns) {
+    const match = text.match(pattern)
+    if (!match) continue
+    const parsed = Number(match[1])
+    if (Number.isFinite(parsed)) return Math.round(parsed * 100)
+  }
+  return null
+}
+
 function normalizeTransactionAmount(value: unknown, kind: unknown, isCents = false): number {
   const parsedCents = Number(value)
   const cents = isCents && Number.isFinite(parsedCents) ? Math.round(parsedCents) : normalizeAmount(value)
@@ -789,7 +869,7 @@ const APP_TOOLS = [
       properties: {
         shoot_name: { type: 'string' },
         company: { type: 'string', description: 'Main POC or client name from the shoot title or description' },
-        income_type: { type: 'string', description: 'Income platform or channel. Refer to knownIncomeTypes in money_data for correct naming.' },
+        income_type: { type: 'string', description: 'Income platform or channel. Refer to knownIncomeTypes in money_data for correct naming. If not clearly specified, use Stimsonphoto. Do not use payment rails like Venmo, Zelle, PayPal, cash, or bank transfer as income_type; put those in notes.' },
         date: { type: ['string', 'number'] },
         amount: { type: ['string', 'number'], description: 'Dollar amount.' },
         amount_cents: { type: 'number', description: 'Integer cents.' },
@@ -798,6 +878,35 @@ const APP_TOOLS = [
         notes: { type: 'string' }
       },
       required: ['shoot_name', 'date', 'amount']
+    }
+  },
+  {
+    name: 'create_income_entries_batch',
+    description: 'Create multiple photography income entries at once. Use this when the user pasted or attached a list of shoots. Each array item becomes its own distinct row; similar titles on different dates are not updates.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        entries: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              shoot_name: { type: 'string' },
+              company: { type: 'string', description: 'Main POC or client name from the shoot title or description' },
+              income_type: { type: 'string', description: 'Income platform or channel. Refer to knownIncomeTypes in money_data for correct naming. If not clearly specified, use Stimsonphoto. Do not use payment rails like Venmo, Zelle, PayPal, cash, or bank transfer as income_type; put those in notes.' },
+              date: { type: ['string', 'number'] },
+              amount: { type: ['string', 'number'], description: 'Dollar amount.' },
+              amount_cents: { type: 'number', description: 'Integer cents.' },
+              tip: { type: ['string', 'number'], description: 'Dollar amount of tip, if any.' },
+              tip_cents: { type: 'number', description: 'Integer cents of tip, if any.' },
+              notes: { type: 'string' }
+            },
+            required: ['shoot_name', 'date'],
+            anyOf: [{ required: ['amount'] }, { required: ['amount_cents'] }]
+          }
+        }
+      },
+      required: ['entries']
     }
   },
   {
@@ -937,15 +1046,41 @@ const APP_TOOLS = [
   }
 ] as const
 
-const ANTHROPIC_TOOLS = APP_TOOLS as unknown as Anthropic.Tool[]
-const OPENAI_TOOLS: ChatCompletionTool[] = APP_TOOLS.map((tool) => ({
-  type: 'function',
-  function: {
-    name: tool.name,
-    description: tool.description,
-    parameters: tool.input_schema
-  }
-}))
+function isIncomePage(pageId: string): boolean {
+  return pageId === 'income' || pageId === 'income-actual'
+}
+
+function shouldRestrictIncomeUpdatesForRequest(pageId: string, message: string, attachments: ChatAttachment[]): boolean {
+  if (!isIncomePage(pageId)) return false
+  const text = message.toLowerCase()
+  if (/\b(?:id|entry)\s*#?\s*\d+\b/.test(text)) return false
+  if (attachments.length > 0) return true
+  if (/\b(import|paste|pasted|upload|uploaded|log|record|add|create|parse|extract)\b/.test(text)) return true
+  if (/\b(statement|invoice|receipt|summary|screenshot|csv|pdf|shoots?)\b/.test(text)) return true
+  const amountMatches = text.match(/\$\s*\d+(?:\.\d{1,2})?/g) ?? []
+  const dateMatches = text.match(/\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b/g) ?? []
+  return amountMatches.length >= 2 || dateMatches.length >= 2
+}
+
+function getAppToolsForRequest(pageId: string, message: string, attachments: ChatAttachment[]) {
+  if (!shouldRestrictIncomeUpdatesForRequest(pageId, message, attachments)) return APP_TOOLS
+  return APP_TOOLS.filter((tool) => tool.name !== 'update_income_entry')
+}
+
+function getAnthropicToolsForRequest(pageId: string, message: string, attachments: ChatAttachment[]): Anthropic.Tool[] {
+  return getAppToolsForRequest(pageId, message, attachments) as unknown as Anthropic.Tool[]
+}
+
+function getOpenAiToolsForRequest(pageId: string, message: string, attachments: ChatAttachment[]): ChatCompletionTool[] {
+  return getAppToolsForRequest(pageId, message, attachments).map((tool) => ({
+    type: 'function' as const,
+    function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.input_schema
+    }
+  }))
+}
 
 export async function startMacDictation(): Promise<void> {
   if (process.platform !== 'darwin') {

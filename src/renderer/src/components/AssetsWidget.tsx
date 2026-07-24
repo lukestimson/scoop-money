@@ -5,6 +5,7 @@ import type { IncomeEntry, Transaction } from '../../../types/money'
 import { useAppContext } from '../context/AppContext'
 import { formatCurrency } from '../lib/currency'
 import type { DisplayPeriod } from '../lib/dates'
+import { netSpendCents } from '../lib/spending'
 
 type AssetsUnit = 'daily' | 'weekly' | 'monthly'
 
@@ -103,9 +104,9 @@ function buildSeries(
       .filter((entry) => entry.date >= bucket.start && entry.date <= bucket.end)
       .reduce((sum, entry) => sum + entry.amount, 0)
 
-    const expense = transactions
-      .filter((tx) => tx.date >= bucket.start && tx.date <= bucket.end && tx.amount < 0)
-      .reduce((sum, tx) => sum + Math.abs(tx.amount), 0)
+    const expense = netSpendCents(
+      transactions.filter((tx) => tx.date >= bucket.start && tx.date <= bucket.end)
+    )
 
     return {
       key: bucket.key,
@@ -239,7 +240,7 @@ export function AssetsWidget({
   return (
     <div className="flex h-full w-full flex-col">
       <div className="mb-2 flex items-start justify-between gap-3">
-        <h2 className="text-lg font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">Income Vs Expenses</h2>
+        <h2 className="text-sm font-semibold uppercase tracking-[0.12em] text-zinc-700 dark:text-zinc-200">Income Vs Expenses</h2>
 
         <div className="flex items-center gap-3" ref={menuRef}>
           <LegendDot color="#10b981" label="Income" />

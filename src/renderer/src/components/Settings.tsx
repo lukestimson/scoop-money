@@ -1,10 +1,8 @@
 import { useEffect, useState } from 'react'
-import type { Account, AccountType, AiPromptSettings, AiProvider, AiProviderState, BackupFile, BudgetItem, CategoryMappingRule } from '../../../types/money'
-import { BUDGET_CATEGORY_ALLOWLIST, BUDGET_CATEGORY_ORDER } from '../../../types/budgetCategories'
+import type { AiPromptSettings, AiProvider, AiProviderState, BackupFile, CategoryMappingRule, ImportTransactionRule } from '../../../types/money'
 import { useAppContext } from '../context/AppContext'
 import { useDateFormat } from '../context/DateFormatContext'
 import { useTheme } from '../context/ThemeContext'
-import { formatCurrency, parseCurrencyInput } from '../lib/currency'
 
 export function Settings() {
   return (
@@ -14,8 +12,6 @@ export function Settings() {
         <DisplaySection />
         <RulesSection />
         <ImportRulesFramework />
-        <BudgetCategoriesSection />
-        <AccountsSection />
         <AiModelSection />
         <AiPromptsSection />
         <BackupsSection />
@@ -115,7 +111,6 @@ const VENMO_CATEGORY_RULES: ReadonlyArray<{ pattern: string; category: string }>
 ]
 
 const VENMO_INCOME_TERMS = 'photo, photography, editing, edit, photo class, class, teaching, lesson, lessons, tip, tips, shoot'
-
 function ImportRulesFramework() {
   const [venmoOpen, setVenmoOpen] = useState(false)
   const [creditOpen, setCreditOpen] = useState(false)
@@ -153,7 +148,7 @@ function ImportRulesFramework() {
 
       {/* Credit Cards */}
       <CollapsibleRuleSection title="Capital One Import Rules" subtitle="Capital One auto-detection; debit → negative, credit → positive" open={creditOpen} onToggle={() => setCreditOpen((v) => !v)}>
-        <p className="text-[11px] text-zinc-500 dark:text-zinc-400">Capital One CSVs are detected by column headers (Transaction Date, Posted Date, Card No., Debit, Credit). Autopay rows are skipped. Category mapping uses the bank&apos;s raw category field.</p>
+        <CapitalOneImportRulesEditor />
       </CollapsibleRuleSection>
 
       {/* Checking */}
@@ -204,86 +199,109 @@ function CollapsibleRuleSection({ title, subtitle, open, onToggle, children }: {
   )
 }
 
-function BudgetCategoriesSection() {
-  const { bumpDataVersion } = useAppContext()
-  const [items, setItems] = useState<BudgetItem[]>([])
+function CapitalOneImportRulesEditor() {
+  const [rules, setRules] = useState<ImportTransactionRule[]>([])
   const [confirm, setConfirm] = useState<number | null>(null)
-  const reload = (): void => { window.api.getBudgetItems().then(setItems) }
+
+  function reload(): void {
+    window.api.getImportTransactionRules('capital_one').then(setRules)
+  }
+
   useEffect(reload, [])
 
-  const sortedItems = [...items]
-    .filter((item) => BUDGET_CATEGORY_ALLOWLIST.has(item.category))
-    .sort((a, b) => {
-      const ia = (BUDGET_CATEGORY_ORDER as readonly string[]).indexOf(a.category)
-      const ib = (BUDGET_CATEGORY_ORDER as readonly string[]).indexOf(b.category)
-      return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib)
+  async function update(id: number, data: Partial<ImportTransactionRule>): Promise<void> {
+    await window.api.updateImportTransactionRule(id, data)
+    reload()
+  }
+
+  async function addRule(): Promise<void> {
+    await window.api.createImportTransactionRule({
+      provider: 'capital_one',
+      match_text: 'NEW MERCHANT',
+      mapped_category: 'Uncategorized',
+      priority: 100
     })
+    reload()
+  }
 
   return (
-    <Panel title="Budget Categories">
-      <div className="mb-2 grid grid-cols-[1fr_96px_115px_115px_115px_72px] gap-3 px-3 text-[11px] uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400">
-        <span>Category</span>
-        <span>Group</span>
-        <span className="text-right">Standard</span>
-        <span className="text-right">With Parents</span>
-        <span className="text-right">With Aid</span>
-        <span className="text-right">Actions</span>
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <p className="max-w-[48rem] text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
+          Double-click any cell to edit. These rules run before the default Capital One category mapping, so you can override merchant text like `ADOBE`, `CHATGPT`, or `CAFE` without changing code.
+        </p>
+        <button
+          type="button"
+          onClick={() => void addRule()}
+          className="rounded-full bg-zinc-900 px-3 py-1.5 text-[12px] font-medium text-white dark:bg-zinc-100 dark:text-zinc-950"
+        >
+          Add import rule
+        </button>
       </div>
-      <div className="space-y-2">
-        {sortedItems.map((item) => (
-          <div key={item.id} className="grid grid-cols-[1fr_96px_115px_115px_115px_72px] items-center gap-3 rounded-lg bg-zinc-50 px-3 py-2 text-sm dark:bg-zinc-950">
-            <EditablePlain value={item.category} onSave={async (value) => { await window.api.updateBudgetItem(item.id, { category: value }); reload(); bumpDataVersion(); }} />
-            <button type="button" onClick={async () => { await window.api.updateBudgetItem(item.id, { is_need: !item.is_need }); reload(); bumpDataVersion(); }} className="rounded-full bg-white px-2.5 py-1 text-[12px] text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200">{item.is_need ? 'Need' : 'Want'}</button>
-            <EditablePlain value={formatCurrency(item.amount_standard)} align="right" onSave={async (value) => { await window.api.updateBudgetItem(item.id, { amount_standard: parseCurrencyInput(value) }); reload(); bumpDataVersion(); }} />
-            <EditablePlain value={formatCurrency(item.amount_with_parents)} align="right" onSave={async (value) => { await window.api.updateBudgetItem(item.id, { amount_with_parents: parseCurrencyInput(value) }); reload(); bumpDataVersion(); }} />
-            <EditablePlain value={formatCurrency(item.amount_with_aid)} align="right" onSave={async (value) => { await window.api.updateBudgetItem(item.id, { amount_with_aid: parseCurrencyInput(value) }); reload(); bumpDataVersion(); }} />
-            {confirm === item.id ? (
-              <div className="text-right text-[12px]"><button type="button" onClick={async () => { await window.api.deleteBudgetItem(item.id); reload(); bumpDataVersion(); }} className="text-red-600">delete</button></div>
-            ) : (
-              <button type="button" onClick={() => setConfirm(item.id)} className="text-right text-[12px] text-zinc-500">Delete</button>
-            )}
-          </div>
-        ))}
+
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[720px] text-sm">
+          <thead>
+            <tr className="text-left text-[11px] uppercase tracking-[0.12em] text-zinc-500">
+              <th className="py-2">Match Text</th>
+              <th>Category</th>
+              <th>Priority</th>
+              <th className="text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rules.map((rule) => (
+              <tr key={rule.id} className="border-t border-zinc-100 dark:border-zinc-800">
+                <EditableCell value={rule.match_text} onSave={(value) => update(rule.id, { match_text: value })} />
+                <td className="py-2">
+                  <div className="flex items-center gap-2">
+                    <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[10px] font-semibold text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200">
+                      Capital One
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <EditablePlain value={rule.mapped_category} onSave={(value) => update(rule.id, { mapped_category: value })} />
+                    </div>
+                  </div>
+                </td>
+                <EditableCell value={String(rule.priority)} onSave={(value) => update(rule.id, { priority: Number(value) || 0 })} align="right" />
+                <td className="py-2 text-right">
+                  {confirm === rule.id ? (
+                    <span className="space-x-2">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await window.api.deleteImportTransactionRule(rule.id)
+                          setConfirm(null)
+                          reload()
+                        }}
+                        className="text-red-600"
+                      >
+                        delete
+                      </button>
+                      <button type="button" onClick={() => setConfirm(null)} className="text-zinc-500">
+                        cancel
+                      </button>
+                    </span>
+                  ) : (
+                    <button type="button" onClick={() => setConfirm(rule.id)} className="text-zinc-500">
+                      Delete
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+            {rules.length === 0 ? (
+              <tr>
+                <td colSpan={4} className="py-4 text-center text-xs text-zinc-400 dark:text-zinc-500">
+                  No Capital One import rules yet.
+                </td>
+              </tr>
+            ) : null}
+          </tbody>
+        </table>
       </div>
-      <p className="mt-3 text-[11px] text-zinc-500 dark:text-zinc-400">
-        Categories are fixed to the app&apos;s budget list; edit amounts here or use the Budget page for line items.
-      </p>
-    </Panel>
+    </div>
   )
-}
-
-function AccountsSection() {
-  const { bumpDataVersion } = useAppContext()
-  const [accounts, setAccounts] = useState<Account[]>([])
-  const reload = (): void => { window.api.getAccounts().then(setAccounts) }
-  useEffect(reload, [])
-  const types: AccountType[] = ['capital_one', 'venmo', 'ebt', 'chase']
-
-  return (
-    <Panel title="Accounts">
-      <div className="space-y-2">
-        {accounts.map((account) => (
-          <div key={account.id} className="grid grid-cols-[1fr_260px_80px] items-center gap-3 rounded-lg bg-zinc-50 px-3 py-2 text-sm dark:bg-zinc-950">
-            <EditablePlain value={account.name} onSave={async (value) => { await window.api.updateAccount(account.id, { name: value }); reload(); bumpDataVersion(); }} />
-            <div className="flex gap-1">
-              {types.map((type) => (
-                <button key={type} type="button" onClick={async () => { await window.api.updateAccount(account.id, { type }); reload(); }} className={`rounded-full px-2 py-1 text-[11px] ${account.type === type ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950' : 'bg-white text-zinc-500 dark:bg-zinc-800'}`}>{accountTypeLabel(type)}</button>
-              ))}
-            </div>
-            <input type="color" value={account.color} onChange={async (event) => { await window.api.updateAccount(account.id, { color: event.target.value }); reload(); }} className="h-7 w-12 bg-transparent" />
-          </div>
-        ))}
-      </div>
-      <button type="button" onClick={async () => { await window.api.createAccount({ name: 'Capital One', type: 'capital_one' }); reload(); bumpDataVersion(); }} className="mt-3 rounded-full bg-zinc-100 px-3 py-1.5 text-[12px] font-medium dark:bg-zinc-800 dark:text-zinc-100">Add account</button>
-    </Panel>
-  )
-}
-
-function accountTypeLabel(type: AccountType): string {
-  if (type === 'capital_one') return 'Capital One'
-  if (type === 'venmo') return 'Venmo'
-  if (type === 'ebt') return 'EBT'
-  return 'Chase'
 }
 
 function DisplaySection() {

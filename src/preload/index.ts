@@ -1,10 +1,27 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
-import type { AiProvider, BudgetType, ChatMessage, MoneyAPI, TransactionFilters } from '../types/money'
+import type {
+  AiProvider,
+  BudgetType,
+  ChatMessage,
+  ImportRuleProvider,
+  MoneyAPI,
+  TransactionFilters
+} from '../types/money'
 
 const api: MoneyAPI = {
+  onMoneyDataMutated: (callback): (() => void) => {
+    const listener = (): void => callback()
+    ipcRenderer.on('money:dataMutated', listener)
+    return (): void => {
+      ipcRenderer.removeListener('money:dataMutated', listener)
+    }
+  },
   onTextScaleCommand: (callback): (() => void) => {
-    const listener = (_event: unknown, command: { kind: 'delta'; delta: number } | { kind: 'reset' }): void => {
+    const listener = (
+      _event: unknown,
+      command: { kind: 'delta'; delta: number } | { kind: 'reset' }
+    ): void => {
       callback(command)
     }
     ipcRenderer.on('ui:textScaleCommand', listener)
@@ -12,13 +29,15 @@ const api: MoneyAPI = {
       ipcRenderer.removeListener('ui:textScaleCommand', listener)
     }
   },
-  getTransactions: (filters?: TransactionFilters) => ipcRenderer.invoke('transactions:getAll', filters),
+  getTransactions: (filters?: TransactionFilters) =>
+    ipcRenderer.invoke('transactions:getAll', filters),
   createTransaction: (data) => ipcRenderer.invoke('transactions:create', data),
   updateTransaction: (id, data) => ipcRenderer.invoke('transactions:update', id, data),
   deleteTransaction: (id) => ipcRenderer.invoke('transactions:delete', id),
   deleteTransactions: (ids) => ipcRenderer.invoke('transactions:deleteMany', ids),
   deleteAllTransactions: () => ipcRenderer.invoke('transactions:deleteAll'),
-  importTransactions: (filePath, accountId) => ipcRenderer.invoke('transactions:import', filePath, accountId),
+  importTransactions: (filePath, accountId) =>
+    ipcRenderer.invoke('transactions:import', filePath, accountId),
   getImportedFiles: (filters) => ipcRenderer.invoke('imports:getAll', filters),
   clearImportedFile: (fileId) => ipcRenderer.invoke('imports:clear', fileId),
   clearIncomeCandidateFlags: (ids) => ipcRenderer.invoke('transactions:clearIncomeFlags', ids),
@@ -48,12 +67,19 @@ const api: MoneyAPI = {
   deleteExpectedIncomeEntry: (id) => ipcRenderer.invoke('incomeExpected:delete', id),
   getIncomeTaxSettings: () => ipcRenderer.invoke('incomeTax:getSettings'),
   updateIncomeTaxSettings: (data) => ipcRenderer.invoke('incomeTax:updateSettings', data),
+  getLivingExpensesSettings: () => ipcRenderer.invoke('livingExpenses:getSettings'),
+  updateLivingExpensesSettings: (data) => ipcRenderer.invoke('livingExpenses:updateSettings', data),
 
   getCategoryRules: () => ipcRenderer.invoke('rules:getAll'),
   createCategoryRule: (data) => ipcRenderer.invoke('rules:create', data),
   updateCategoryRule: (id, data) => ipcRenderer.invoke('rules:update', id, data),
   deleteCategoryRule: (id) => ipcRenderer.invoke('rules:delete', id),
   recategorizeAllTransactions: () => ipcRenderer.invoke('rules:recategorizeAll'),
+  getImportTransactionRules: (provider?: ImportRuleProvider) =>
+    ipcRenderer.invoke('importRules:getAll', provider),
+  createImportTransactionRule: (data) => ipcRenderer.invoke('importRules:create', data),
+  updateImportTransactionRule: (id, data) => ipcRenderer.invoke('importRules:update', id, data),
+  deleteImportTransactionRule: (id) => ipcRenderer.invoke('importRules:delete', id),
 
   chat: (pageId: string, message: string, history: ChatMessage[], attachments = []) =>
     ipcRenderer.invoke('ai:chat', pageId, message, history, attachments),

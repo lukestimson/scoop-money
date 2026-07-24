@@ -1,0 +1,702 @@
+[
+  {
+    "date": 1782759600,
+    "description": "BAYWHEE*2 RIDES",
+    "amount": -152,
+    "raw_category": "Transportation",
+    "notes": "Capital One card 1234 | Raw category: Other Travel",
+    "mapped_category": "Transportation",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1782673200,
+    "description": "BAYWHEE*2 RIDES",
+    "amount": -147,
+    "raw_category": "Transportation",
+    "notes": "Capital One card 1234 | Raw category: Other Travel",
+    "mapped_category": "Transportation",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1782500400,
+    "description": "PHOTO PLUS",
+    "amount": -2496,
+    "raw_category": "Business Expenses",
+    "notes": "Capital One card 1234 | Raw category: Other Services",
+    "mapped_category": "Business Expenses",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1782586800,
+    "description": "TST*TOSCANO BROTHERS",
+    "amount": -643,
+    "raw_category": "Other",
+    "notes": "Capital One card 1234 | Raw category: Other",
+    "mapped_category": "Other",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1782586800,
+    "description": "BAYWHEE*2 RIDES",
+    "amount": -49,
+    "raw_category": "Transportation",
+    "notes": "Capital One card 1234 | Raw category: Other Travel",
+    "mapped_category": "Transportation",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1782586800,
+    "description": "LAKAYS BARBERSHOP",
+    "amount": -1000,
+    "raw_category": "Business Expenses",
+    "notes": "Capital One card 1234 | Raw category: Other Services",
+    "mapped_category": "Business Expenses",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1782586800,
+    "description": "ADOBE *ADOBE",
+    "amount": -3999,
+    "raw_category": "Shopping",
+    "notes": "Capital One card 1234 | Raw category: Merchandise",
+    "mapped_category": "Shopping",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1782500400,
+    "description": "BAYWHEE*2 RIDES",
+    "amount": -142,
+    "raw_category": "Transportation",
+    "notes": "Capital One card 1234 | Raw category: Other Travel",
+    "mapped_category": "Transportation",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1782500400,
+    "description": "SQ *MOTORING COFFEE SF",
+    "amount": -534,
+    "raw_category": "Dining",
+    "notes": "Capital One card 1234 | Raw category: Dining",
+    "mapped_category": "Dining",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1782327600,
+    "description": "BAYWHEE*5 RIDES",
+    "amount": -733,
+    "raw_category": "Transportation",
+    "notes": "Capital One card 1234 | Raw category: Other Travel",
+    "mapped_category": "Transportation",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1782241200,
+    "description": "BAYWHEE*2 RIDES",
+    "amount": -141,
+    "raw_category": "Transportation",
+    "notes": "Capital One card 1234 | Raw category: Other Travel",
+    "mapped_category": "Transportation",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1782241200,
+    "description": "IDEMIA TSA TWIC",
+    "amount": -12400,
+    "raw_category": "Business Expenses",
+    "notes": "Capital One card 1234 | Raw category: Other Services",
+    "mapped_category": "Business Expenses",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1782241200,
+    "description": "SQ *OUTTA SIGHT // CLAY",
+    "amount": -643,
+    "raw_category": "Dining",
+    "notes": "Capital One card 1234 | Raw category: Dining",
+    "mapped_category": "Dining",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1782154800,
+    "description": "SQ *CORGI CAFE",
+    "amount": -426,
+    "raw_category": "Dining",
+    "notes": "Capital One card 1234 | Raw category: Dining",
+    "mapped_category": "Dining",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1782154800,
+    "description": "SQ *220 MONTGOMERY - RBC",
+    "amount": -450,
+    "raw_category": "Dining",
+    "notes": "Capital One card 1234 | Raw category: Dining",
+    "mapped_category": "Dining",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1782068400,
+    "description": "EXXON LOS GATOS",
+    "amount": -1065,
+    "raw_category": "Gas/Automotive",
+    "notes": "Capital One card 1234 | Raw category: Gas/Automotive",
+    "mapped_category": "Gas/Automotive",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1782068400,
+    "description": "BAYWHEE*2 RIDES",
+    "amount": -169,
+    "raw_category": "Transportation",
+    "notes": "Capital One card 1234 | Raw category: Other Travel",
+    "mapped_category": "Transportation",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1782068400,
+    "description": "BIRD APP* SUBSCRIPTION",
+    "amount": -435,
+    "raw_category": "Entertainment",
+    "notes": "Capital One card 1234 | Raw category: Entertainment",
+    "mapped_category": "Entertainment",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1782068400,
+    "description": "APPLE.COM/BILL",
+    "amount": -2000,
+    "raw_category": "Entertainment",
+    "notes": "Capital One card 1234 | Raw category: Entertainment",
+    "mapped_category": "Entertainment",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1781982000,
+    "description": "BAYWHEE*1 RIDE",
+    "amount": -65,
+    "raw_category": "Transportation",
+    "notes": "Capital One card 1234 | Raw category: Other Travel",
+    "mapped_category": "Transportation",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1782068400,
+    "description": "Google One",
+    "amount": -999,
+    "raw_category": "Subscriptions",
+    "notes": "Capital One card 1234 | Raw category: Internet",
+    "mapped_category": "Subscriptions",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1781895600,
+    "description": "BAYWHEE*2 RIDES",
+    "amount": -119,
+    "raw_category": "Transportation",
+    "notes": "Capital One card 1234 | Raw category: Other Travel",
+    "mapped_category": "Transportation",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1781809200,
+    "description": "LYFT   *BAYWHEELS BIKE",
+    "amount": -33,
+    "raw_category": "Transportation",
+    "notes": "Capital One card 1234 | Raw category: Other Travel",
+    "mapped_category": "Transportation",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1781809200,
+    "description": "BAYWHEE*3 RIDES",
+    "amount": -223,
+    "raw_category": "Transportation",
+    "notes": "Capital One card 1234 | Raw category: Other Travel",
+    "mapped_category": "Transportation",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1781722800,
+    "description": "TST*SIGHTGLASS COFFEE -",
+    "amount": -917,
+    "raw_category": "Dining",
+    "notes": "Capital One card 1234 | Raw category: Dining",
+    "mapped_category": "Dining",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1781722800,
+    "description": "BAYWHEE*2 RIDES",
+    "amount": -76,
+    "raw_category": "Transportation",
+    "notes": "Capital One card 1234 | Raw category: Other Travel",
+    "mapped_category": "Transportation",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1781722800,
+    "description": "SWENSENS OF SAN FRANCISCO",
+    "amount": -545,
+    "raw_category": "Shopping",
+    "notes": "Capital One card 1234 | Raw category: Merchandise",
+    "mapped_category": "Shopping",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1781722800,
+    "description": "IKEA SAN FRAN REST",
+    "amount": -163,
+    "raw_category": "Dining",
+    "notes": "Capital One card 1234 | Raw category: Dining",
+    "mapped_category": "Dining",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1781636400,
+    "description": "BAYWHEE*SUBSCRIPTION",
+    "amount": -542,
+    "raw_category": "Transportation",
+    "notes": "Capital One card 1234 | Raw category: Other Travel",
+    "mapped_category": "Transportation",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1781636400,
+    "description": "SQ *ANOTHER CAFE",
+    "amount": -1754,
+    "raw_category": "Dining",
+    "notes": "Capital One card 1234 | Raw category: Dining",
+    "mapped_category": "Dining",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1781550000,
+    "description": "CLIPPER TRANSIT FARE",
+    "amount": -460,
+    "raw_category": "Transportation",
+    "notes": "Capital One card 1234 | Raw category: Other Travel",
+    "mapped_category": "Transportation",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1781550000,
+    "description": "APPLE.COM/BILL",
+    "amount": -299,
+    "raw_category": "Entertainment",
+    "notes": "Capital One card 1234 | Raw category: Entertainment",
+    "mapped_category": "Entertainment",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1781463600,
+    "description": "CLIPPER TRANSIT FARE",
+    "amount": -285,
+    "raw_category": "Transportation",
+    "notes": "Capital One card 1234 | Raw category: Other Travel",
+    "mapped_category": "Transportation",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1781290800,
+    "description": "HILLSTONE 415.392.9280",
+    "amount": -4890,
+    "raw_category": "Dining",
+    "notes": "Capital One card 1234 | Raw category: Dining",
+    "mapped_category": "Dining",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1781290800,
+    "description": "CLIPPER TRANSIT FARE",
+    "amount": -285,
+    "raw_category": "Transportation",
+    "notes": "Capital One card 1234 | Raw category: Other Travel",
+    "mapped_category": "Transportation",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1781204400,
+    "description": "SQ *JOYRIDE PIZZA, PIER 1",
+    "amount": -620,
+    "raw_category": "Dining",
+    "notes": "Capital One card 1234 | Raw category: Dining",
+    "mapped_category": "Dining",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1781204400,
+    "description": "CLIPPER TRANSIT FARE",
+    "amount": -145,
+    "raw_category": "Transportation",
+    "notes": "Capital One card 1234 | Raw category: Other Travel",
+    "mapped_category": "Transportation",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1781204400,
+    "description": "CLIPPER TRANSIT FARE",
+    "amount": -205,
+    "raw_category": "Transportation",
+    "notes": "Capital One card 1234 | Raw category: Other Travel",
+    "mapped_category": "Transportation",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1781118000,
+    "description": "TACO BELL 30754",
+    "amount": -438,
+    "raw_category": "Dining",
+    "notes": "Capital One card 1234 | Raw category: Dining",
+    "mapped_category": "Dining",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1781118000,
+    "description": "SQ *CHIT CHAT CAFE",
+    "amount": -700,
+    "raw_category": "Dining",
+    "notes": "Capital One card 1234 | Raw category: Dining",
+    "mapped_category": "Dining",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1781031600,
+    "description": "OPENAI *CHATGPT SUBSCR",
+    "amount": -2000,
+    "raw_category": "Shopping",
+    "notes": "Capital One card 1234 | Raw category: Merchandise",
+    "mapped_category": "Shopping",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1781031600,
+    "description": "SQ *ANOTHER CAFE",
+    "amount": -450,
+    "raw_category": "Dining",
+    "notes": "Capital One card 1234 | Raw category: Dining",
+    "mapped_category": "Dining",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780945200,
+    "description": "TST* GREENS SPORTS BAR",
+    "amount": -708,
+    "raw_category": "Dining",
+    "notes": "Capital One card 1234 | Raw category: Dining",
+    "mapped_category": "Dining",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780945200,
+    "description": "TST* GREENS SPORTS BAR",
+    "amount": -720,
+    "raw_category": "Dining",
+    "notes": "Capital One card 1234 | Raw category: Dining",
+    "mapped_category": "Dining",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780945200,
+    "description": "GDP*La Promenade Cafe",
+    "amount": -647,
+    "raw_category": "Dining",
+    "notes": "Capital One card 1234 | Raw category: Dining",
+    "mapped_category": "Dining",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1781031600,
+    "description": "REPLICATE",
+    "amount": -249,
+    "raw_category": "Shopping",
+    "notes": "Capital One card 1234 | Raw category: Merchandise",
+    "mapped_category": "Shopping",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780858800,
+    "description": "MADRONE ART BAR",
+    "amount": -2308,
+    "raw_category": "Dining",
+    "notes": "Capital One card 1234 | Raw category: Dining",
+    "mapped_category": "Dining",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780772400,
+    "description": "POLK STREET MARKET",
+    "amount": -2107,
+    "raw_category": "Dining",
+    "notes": "Capital One card 1234 | Raw category: Merchandise",
+    "mapped_category": "Dining",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780858800,
+    "description": "SQ *MADRONE ART BAR",
+    "amount": -1000,
+    "raw_category": "Dining",
+    "notes": "Capital One card 1234 | Raw category: Dining",
+    "mapped_category": "Dining",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780772400,
+    "description": "COLE HARDWARE",
+    "amount": -433,
+    "raw_category": "Shopping",
+    "notes": "Capital One card 1234 | Raw category: Merchandise",
+    "mapped_category": "Shopping",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780599600,
+    "description": "ALASKA AIR  0272147376740",
+    "amount": -13140,
+    "raw_category": "Airfare",
+    "notes": "Capital One card 1234 | Raw category: Airfare",
+    "mapped_category": "Airfare",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780599600,
+    "description": "ALASKA AIR  0272147376739",
+    "amount": -13140,
+    "raw_category": "Airfare",
+    "notes": "Capital One card 1234 | Raw category: Airfare",
+    "mapped_category": "Airfare",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780772400,
+    "description": "APPLE.COM/BILL",
+    "amount": 3999,
+    "raw_category": "Entertainment",
+    "notes": "Capital One card 1234 | Raw category: Entertainment",
+    "mapped_category": "Entertainment",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780599600,
+    "description": "OZZYS CAFE & GRILL",
+    "amount": -3231,
+    "raw_category": "Dining",
+    "notes": "Capital One card 1234 | Raw category: Dining",
+    "mapped_category": "Dining",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780599600,
+    "description": "DELTA AIR   0062436658363",
+    "amount": -25341,
+    "raw_category": "Airfare",
+    "notes": "Capital One card 1234 | Raw category: Airfare",
+    "mapped_category": "Airfare",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780599600,
+    "description": "DELTA AIR   0062436658364",
+    "amount": -25341,
+    "raw_category": "Airfare",
+    "notes": "Capital One card 1234 | Raw category: Airfare",
+    "mapped_category": "Airfare",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780599600,
+    "description": "SHUTTERFLY, INC.",
+    "amount": -1615,
+    "raw_category": "Business Expenses",
+    "notes": "Capital One card 1234 | Raw category: Other Services",
+    "mapped_category": "Business Expenses",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780426800,
+    "description": "USPS PO 0568060042",
+    "amount": -608,
+    "raw_category": "Business Expenses",
+    "notes": "Capital One card 1234 | Raw category: Other Services",
+    "mapped_category": "Business Expenses",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780426800,
+    "description": "SQ *CAFE #27255 UNION SQU",
+    "amount": -322,
+    "raw_category": "Dining",
+    "notes": "Capital One card 1234 | Raw category: Dining",
+    "mapped_category": "Dining",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780426800,
+    "description": "CLIPPER TRANSIT FARE",
+    "amount": -285,
+    "raw_category": "Transportation",
+    "notes": "Capital One card 1234 | Raw category: Other Travel",
+    "mapped_category": "Transportation",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780340400,
+    "description": "PEET'S #00502",
+    "amount": -372,
+    "raw_category": "Dining",
+    "notes": "Capital One card 1234 | Raw category: Dining",
+    "mapped_category": "Dining",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780340400,
+    "description": "WALGREENS #6625",
+    "amount": -1985,
+    "raw_category": "Healthcare",
+    "notes": "Capital One card 1234 | Raw category: Health Care",
+    "mapped_category": "Healthcare",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780254000,
+    "description": "GOLDEN GATE MARKET",
+    "amount": -1646,
+    "raw_category": "Shopping",
+    "notes": "Capital One card 1234 | Raw category: Merchandise",
+    "mapped_category": "Shopping",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780254000,
+    "description": "PAYRANGE MOBILE",
+    "amount": -1000,
+    "raw_category": "Phone/Cable",
+    "notes": "Capital One card 1234 | Raw category: Phone/Cable",
+    "mapped_category": "Phone/Cable",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780167600,
+    "description": "MONAGHANS",
+    "amount": -1078,
+    "raw_category": "Dining",
+    "notes": "Capital One card 1234 | Raw category: Dining",
+    "mapped_category": "Dining",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780167600,
+    "description": "MONAGHANS",
+    "amount": -1730,
+    "raw_category": "Dining",
+    "notes": "Capital One card 1234 | Raw category: Dining",
+    "mapped_category": "Dining",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780167600,
+    "description": "COLE HARDWARE",
+    "amount": -1301,
+    "raw_category": "Shopping",
+    "notes": "Capital One card 1234 | Raw category: Merchandise",
+    "mapped_category": "Shopping",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780254000,
+    "description": "APPLE.COM/BILL",
+    "amount": -3999,
+    "raw_category": "Entertainment",
+    "notes": "Capital One card 1234 | Raw category: Entertainment",
+    "mapped_category": "Entertainment",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780254000,
+    "description": "PelicanTunes",
+    "amount": -200,
+    "raw_category": "Shopping",
+    "notes": "Capital One card 1234 | Raw category: Merchandise",
+    "mapped_category": "Shopping",
+    "income_candidate": false,
+    "external_id": null
+  },
+  {
+    "date": 1780167600,
+    "description": "SQ *MOTORING COFFEE SF",
+    "amount": -450,
+    "raw_category": "Dining",
+    "notes": "Capital One card 1234 | Raw category: Dining",
+    "mapped_category": "Dining",
+    "income_candidate": false,
+    "external_id": null
+  }
+]

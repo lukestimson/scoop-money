@@ -9,3 +9,28 @@ release
 .npmrc
 .eslintcache
 *.log
+
+# Sensitive financial and user data files
+*.xlsx
+*.xls
+*.csv
+*.db
+* alias
+
+# Screenshots and temp assets
+*.jpg
+*.jpeg
+*.png
+*.PNG
+# Keep app assets and icons
+!src/**/*.png
+!src/**/*.jpg
+!src/**/*.PNG
+!src/**/*.jpeg
+!resources/**/*.png
+!resources/**/*.jpg
+!resources/**/*.ico
+!resources/**/*.icns
+
+# TypeScript build cache
+*.tsbuildinfo

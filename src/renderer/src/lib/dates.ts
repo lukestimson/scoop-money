@@ -13,6 +13,7 @@ import {
   startOfYear
 } from 'date-fns'
 import type { PeriodGroup, Transaction } from '../../../types/money'
+import { netSpendCents } from './spending'
 
 export type PeriodUnit = 'day' | 'week' | 'month'
 
@@ -46,7 +47,7 @@ export function groupTransactionsByPeriod(transactions: Transaction[], unit: Per
       const key = String(bounds.start)
       const label = unit === 'day' ? format(date, 'MMM d') : unit === 'week' ? format(date, 'MMM d') : format(date, 'MMM yyyy')
       const current = groups.get(key) ?? { key, label, start: bounds.start, end: bounds.end, amount: 0 }
-      current.amount -= tx.amount
+      current.amount += netSpendCents([tx])
       groups.set(key, current)
     })
   return Array.from(groups.values()).sort((a, b) => a.start - b.start)

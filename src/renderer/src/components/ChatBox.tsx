@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type DragEvent, type FormEvent, type Ref } from 'react'
 import { flushSync } from 'react-dom'
-import type { AiProvider, ChatAttachment, ChatMessage, ModelInfo, PageId } from '../../../types/money'
+import type { AiProvider, AiUsageSummary, ChatAttachment, ChatMessage, ModelInfo, PageId } from '../../../types/money'
 import { useAppContext } from '../context/AppContext'
 import { chatMessagesToTurns, newChatMessageId, useChat } from '../context/ChatContext'
 
@@ -57,6 +57,7 @@ export function ChatBox({
   const [models, setModels] = useState<ModelInfo[]>([])
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
   const [resizing, setResizing] = useState(false)
+  const [lastUsage, setLastUsage] = useState<AiUsageSummary | null>(null)
 
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const attachBtnRef = useRef<HTMLButtonElement | null>(null)
@@ -358,6 +359,7 @@ export function ChatBox({
     setDraft(pageId, '')
     setAttachments([])
     setIsSending(true)
+    setLastUsage(null)
 
     try {
       const result = await window.api.chat(pageId, trimmed, priorHistory, payload)
@@ -365,6 +367,7 @@ export function ChatBox({
         ...current,
         { id: newChatMessageId(), role: 'assistant', content: result.text, createdAt: Date.now() }
       ])
+      if (result.usage) setLastUsage(result.usage)
       if (result.dataChanged) bumpDataVersion()
     } catch (error) {
       setMessages(pageId, (current) => [
@@ -512,6 +515,10 @@ export function ChatBox({
             </span>
           ) : null}
 
+          {isExpanded && lastUsage && !isSending ? (
+            <AssistantRunStatus isSending={false} usage={lastUsage} className="mr-1.5" />
+          ) : null}
+
           <div className="relative">
             <button
               ref={modelBtnRef}
@@ -640,10 +647,12 @@ export function ChatBox({
             >
               <PanelChevronUpIcon />
             </button>
-            {isSending ? (
-              <span className="pointer-events-none absolute right-2 top-1/2 inline-flex -translate-y-1/2 items-center text-zinc-500 dark:text-zinc-400" aria-label="Assistant is replying" title="Assistant is replying">
-                <SpinnerIcon />
-              </span>
+            {isSending || lastUsage ? (
+              <AssistantRunStatus
+                isSending={isSending}
+                usage={lastUsage}
+                className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2"
+              />
             ) : null}
           </div>
         )}
@@ -654,10 +663,22 @@ export function ChatBox({
 
 function MessageBubble({ message }: { message: ChatMessage }) {
   const isUser = message.role === 'user'
+  const [copied, setCopied] = useState(false)
+
+  async function handleCopy(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(message.content)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1200)
+    } catch {
+      setCopied(false)
+    }
+  }
+
   return (
     <div className={`flex w-full ${isUser ? 'justify-end' : 'justify-start'}`}>
       <div
-        className={`max-w-[85%] whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm leading-relaxed ${
+        className={`max-w-[85%] rounded-2xl px-3 py-2 text-sm leading-relaxed ${
           isUser
             ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900'
             : message.error
@@ -665,7 +686,22 @@ function MessageBubble({ message }: { message: ChatMessage }) {
               : 'bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100'
         }`}
       >
-        {message.content}
+        <div className="whitespace-pre-wrap">{message.content}</div>
+        <div className="mt-1 flex justify-end">
+          <button
+            type="button"
+            onClick={() => void handleCopy()}
+            aria-label={copied ? 'Copied' : 'Copy message'}
+            title={copied ? 'Copied' : 'Copy'}
+            className={`inline-flex h-6 w-6 items-center justify-center rounded-full transition-colors ${
+              isUser
+                ? 'text-white/55 hover:bg-white/12 hover:text-white dark:text-zinc-900/55 dark:hover:bg-zinc-900/10 dark:hover:text-zinc-900'
+                : 'text-zinc-400 hover:bg-black/5 hover:text-zinc-700 dark:text-zinc-500 dark:hover:bg-white/8 dark:hover:text-zinc-200'
+            }`}
+          >
+            {copied ? <CheckCopyIcon /> : <CopyIcon />}
+          </button>
+        </div>
       </div>
     </div>
   )
@@ -680,6 +716,49 @@ function LoadingBubble() {
         <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-400" />
       </div>
     </div>
+  )
+}
+
+function formatAiCostUsd(usd: number): string {
+  if (usd >= 0.01) return `$${usd.toFixed(2)}`
+  return `$${usd.toFixed(3)}`
+}
+
+function AssistantRunStatus({
+  isSending,
+  usage,
+  className
+}: {
+  isSending: boolean
+  usage: AiUsageSummary | null
+  className?: string
+}): React.JSX.Element | null {
+  if (isSending) {
+    return (
+      <span
+        className={['inline-flex items-center text-zinc-400 dark:text-zinc-500', className].filter(Boolean).join(' ')}
+        aria-label="Assistant is replying"
+        title="Assistant is replying"
+      >
+        <SpinnerIcon />
+      </span>
+    )
+  }
+  if (!usage) return null
+
+  const callLabel = usage.apiCalls === 1 ? '1 call' : `${usage.apiCalls} calls`
+  const tokenDetail = `${usage.inputTokens.toLocaleString()} in · ${usage.outputTokens.toLocaleString()} out tokens`
+
+  return (
+    <span
+      className={[
+        'inline-flex items-center text-[10px] font-medium tabular-nums text-zinc-400 dark:text-zinc-500',
+        className
+      ].filter(Boolean).join(' ')}
+      title={`${callLabel} · ${tokenDetail}`}
+    >
+      {callLabel} · {formatAiCostUsd(usage.costUsd)}
+    </span>
   )
 }
 
@@ -801,3 +880,5 @@ function UploadIcon() { return <svg width="20" height="20" viewBox="0 0 20 20" f
 function XIcon() { return <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"><path d="m3 3 6 6M9 3l-6 6" /></svg> }
 function ChevronDownIcon() { return <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M5 7.5 L10 12.5 L15 7.5" /></svg> }
 function CheckIcon() { return <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="text-zinc-900"><path d="m3 7.5 2.5 2.5L11 4" /></svg> }
+function CopyIcon() { return <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="5.25" y="3.25" width="7.5" height="9" rx="1.5" /><path d="M10.75 3.25V2.5A1.25 1.25 0 0 0 9.5 1.25H3.5A1.25 1.25 0 0 0 2.25 2.5v8A1.25 1.25 0 0 0 3.5 11.75h1" /></svg> }
+function CheckCopyIcon() { return <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m3.5 8.5 2.25 2.25L12.5 4" /></svg> }
