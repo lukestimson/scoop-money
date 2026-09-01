@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { addMonths, addWeeks, addYears, endOfMonth, endOfWeek, endOfYear, format, getDay, getDaysInMonth, startOfMonth, startOfWeek, startOfYear } from 'date-fns'
-import type { Account, BudgetItem, BudgetLineItem, ImportedFileRecord, Transaction } from '../../../types/money'
+import type { Account, BudgetItem, BudgetLineItem, ImportedFileRecord, IncomeEntry, Transaction } from '../../../types/money'
 import { parseLocalDateToUnix } from '../../../types/dateParsing'
 import { useAppContext } from '../context/AppContext'
 import { useDateFormat } from '../context/DateFormatContext'
@@ -17,10 +17,11 @@ type DisplayPeriod = 'week' | 'month' | 'year'
 type SortKey = 'date' | 'amount' | 'category' | 'recent'
 
 interface UndoAction {
-  type: 'delete_one' | 'delete_all' | 'clear_file' | 'clear_all_files' | 'ignore_income' | 'delete_income'
+  type: 'delete_one' | 'delete_all' | 'clear_file' | 'clear_all_files' | 'ignore_income' | 'delete_income' | 'move_to_income'
   transactions: Transaction[]
   files?: ImportedFileRecord[]
   flaggedIds?: number[]
+  incomeEntries?: IncomeEntry[]
 }
 
 const IMPORT_COLLAPSED_KEY = 'scoop_import_collapsed'
@@ -418,6 +419,7 @@ export function Transactions() {
       ),
     [accountsById, govAidActive, visibleTransactions]
   )
+  const contextMenuTransaction = contextMenu ? transactions.find((transaction) => transaction.id === contextMenu.txId) : null
 
   function pushUndo(action: UndoAction): void {
     undoStackRef.current.push(action)
@@ -431,6 +433,16 @@ export function Transactions() {
     if (action.type === 'ignore_income' && action.flaggedIds?.length) {
       for (const id of action.flaggedIds) {
         await window.api.updateTransaction(id, { income_candidate: true })
+      }
+    } else if (action.type === 'move_to_income') {
+      for (const income of action.incomeEntries ?? []) await window.api.deleteIncomeEntry(income.id)
+      for (const tx of action.transactions) {
+        await window.api.createTransaction({
+          date: tx.date, description: tx.description, amount: tx.amount,
+          mapped_category: tx.mapped_category, raw_category: tx.raw_category ?? tx.mapped_category,
+          account_id: tx.account_id ?? null, source: tx.source ?? 'manual', notes: tx.notes,
+          income_candidate: tx.income_candidate, external_id: tx.external_id
+        })
       }
     } else if (action.type === 'delete_income') {
       for (const tx of action.transactions) {
@@ -492,6 +504,19 @@ export function Transactions() {
     if (tx) pushUndo({ type: 'delete_one', transactions: [tx] })
     await window.api.deleteTransaction(id)
     bumpDataVersion()
+  }
+
+  async function moveTransactionToIncome(id: number): Promise<void> {
+    const transaction = transactions.find((item) => item.id === id)
+    if (!transaction || transaction.amount <= 0) return
+    setError('')
+    try {
+      const income = await window.api.moveTransactionToIncome(id)
+      pushUndo({ type: 'move_to_income', transactions: [transaction], incomeEntries: [income] })
+      bumpDataVersion()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
   }
 
   async function deleteAllTransactions(): Promise<void> {
@@ -816,9 +841,16 @@ export function Transactions() {
                     <button type="button" onClick={() => setContextMenu(null)} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-zinc-500 hover:bg-zinc-50 dark:text-zinc-400 dark:hover:bg-zinc-800">Cancel</button>
                   </>
                 ) : (
-                  <button type="button" onClick={() => setContextMenu({ ...contextMenu, confirming: true })} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30">
-                    <XIcon />Delete
-                  </button>
+                  <>
+                    {(contextMenuTransaction?.amount ?? 0) > 0 ? (
+                      <button type="button" onClick={async () => { await moveTransactionToIncome(contextMenu.txId); setContextMenu(null) }} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-emerald-700 hover:bg-emerald-50 dark:text-emerald-300 dark:hover:bg-emerald-950/30">
+                        Move to income
+                      </button>
+                    ) : null}
+                    <button type="button" onClick={() => setContextMenu({ ...contextMenu, confirming: true })} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30">
+                      <XIcon />Delete
+                    </button>
+                  </>
                 )}
               </div>
             )}

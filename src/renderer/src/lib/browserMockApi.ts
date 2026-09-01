@@ -486,6 +486,15 @@ export function installBrowserMockApi(): void {
     deleteTransaction: async (rowId) => {
       transactions = transactions.filter((row) => row.id !== rowId)
     },
+    moveTransactionToIncome: async (rowId) => {
+      const transaction = transactions.find((row) => row.id === rowId)
+      if (!transaction || transaction.amount <= 0) throw new Error('Only positive transactions can be moved to income.')
+      const row = income(transaction.date, transaction.description, '', transaction.amount, '')
+      row.notes = transaction.notes
+      incomeEntries = [row, ...incomeEntries]
+      transactions = transactions.filter((candidate) => candidate.id !== rowId)
+      return copy(row)
+    },
     deleteTransactions: async (ids) => {
       const before = transactions.length
       transactions = transactions.filter((row) => !ids.includes(row.id))

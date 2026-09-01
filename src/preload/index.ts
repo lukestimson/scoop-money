@@ -34,6 +34,7 @@ const api: MoneyAPI = {
   createTransaction: (data) => ipcRenderer.invoke('transactions:create', data),
   updateTransaction: (id, data) => ipcRenderer.invoke('transactions:update', id, data),
   deleteTransaction: (id) => ipcRenderer.invoke('transactions:delete', id),
+  moveTransactionToIncome: (id) => ipcRenderer.invoke('transactions:moveToIncome', id),
   deleteTransactions: (ids) => ipcRenderer.invoke('transactions:deleteMany', ids),
   deleteAllTransactions: () => ipcRenderer.invoke('transactions:deleteAll'),
   importTransactions: (filePath, accountId) =>

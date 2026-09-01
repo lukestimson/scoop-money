@@ -23,6 +23,7 @@ import type {
   TransactionFilters,
   TransactionSource
 } from '../types/money'
+import { incomeDataFromPositiveTransaction } from './transactionIncomeTransfer'
 import { BUDGET_CATEGORY_ORDER, defaultIsNeedForBudgetCategory } from '../types/budgetCategories'
 import { inferLineIsNeed } from '../types/budgetNeedRules'
 
@@ -1974,6 +1975,18 @@ export function updateTransaction(id: number, data: Partial<Transaction>): Trans
 
 export function deleteTransaction(id: number): void {
   getDb().prepare('DELETE FROM transactions WHERE id = ?').run(id)
+}
+
+export function moveTransactionToIncome(id: number): IncomeEntry {
+  const db = getDb()
+  const move = db.transaction((transactionId: number): IncomeEntry => {
+    const transaction = getTransactionById(transactionId)
+    const income = createIncomeEntry(incomeDataFromPositiveTransaction(transaction))
+    const deleted = db.prepare('DELETE FROM transactions WHERE id = ?').run(transactionId)
+    if (deleted.changes !== 1) throw new Error(`Transaction ${transactionId} could not be moved to income.`)
+    return income
+  })
+  return move(id)
 }
 
 export function deleteTransactions(ids: number[]): { deleted: number } {
