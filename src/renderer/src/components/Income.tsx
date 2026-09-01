@@ -14,7 +14,7 @@ import { BudgetAidIndicators } from './BudgetAidIndicators'
 import { IncomeNotesPanel, type IncomeNotesPanelHandle } from './IncomeNotesPanel'
 import { IncomeTypeField, INCOME_TYPE_COLOR_EDITOR_SELECTOR, INCOME_TYPE_MENU_SELECTOR } from './IncomeTypeField'
 import { ListSectionSearchBar, type ListSearchPhase } from './ListSectionSearchBar'
-import { incomeTypeChipPresentation, readIncomeTypeColorHex, removeIncomeTypeColorHex, setIncomeTypeColorHex, subscribeIncomeTypeColors } from '../lib/incomeTypeColors'
+import { incomeTypeChipPresentation, readIncomeTypeColorHex, removeIncomeTypeColorHex, resolveIncomeTypeColorHex, setIncomeTypeColorHex, subscribeIncomeTypeColors } from '../lib/incomeTypeColors'
 import { DisplayPeriod, getDisplayPeriodBounds, stepDisplayAnchor, formatDisplayAnchor } from '../lib/dates'
 
 const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -27,7 +27,7 @@ const INCOME_KIND_OPTIONS: Array<{ value: IncomeKind; label: string; detail: str
   { value: 'self_employment', label: 'Self-employed', detail: '1099 or freelance' },
   { value: 'other', label: 'Other', detail: 'Not payroll taxed here' }
 ]
-type IncomeSortKey = 'date' | 'amount' | 'name' | 'recent'
+type IncomeSortKey = 'date' | 'amount' | 'type'
 type IncomeEditField = 'date' | 'shoot_name' | 'company' | 'income_type' | 'tip' | 'amount' | 'notes' | 'all' | null
 type ExplanationPoint = { label: string; value: string; aidAdjusted?: boolean }
 type Explanation = {
@@ -42,9 +42,8 @@ type Explanation = {
 const INCOME_SORT_KEY = 'scoop_income_actual_sort'
 const INCOME_SORT_OPTIONS: ReadonlyArray<{ id: IncomeSortKey; label: string }> = [
   { id: 'date', label: 'Date' },
-  { id: 'amount', label: 'Amount' },
-  { id: 'name', label: 'Name' },
-  { id: 'recent', label: 'Recently Added' }
+  { id: 'type', label: 'Type' },
+  { id: 'amount', label: 'Amount: High to Low' }
 ]
 
 function roundCentsToWholeDollars(cents: number): number {
@@ -82,9 +81,8 @@ interface IncomeUndoAction {
 
 function getStoredIncomeSort(): IncomeSortKey {
   const value = localStorage.getItem(INCOME_SORT_KEY)
-  if (value === 'date' || value === 'amount' || value === 'name' || value === 'company' || value === 'recent') {
-    return value === 'company' ? 'name' : value
-  }
+  if (value === 'date' || value === 'amount' || value === 'type') return value
+  if (value === 'name' || value === 'company') return 'type'
   return 'date'
 }
 
@@ -345,11 +343,10 @@ export function IncomeActual() {
     () => {
       const list = [...visibleEntries]
       if (sortKey === 'amount') return list.sort((a, b) => b.amount - a.amount)
-      if (sortKey === 'name') return list.sort((a, b) => {
-        const byName = (a.company || '').localeCompare(b.company || '')
-        return byName !== 0 ? byName : b.date - a.date
+      if (sortKey === 'type') return list.sort((a, b) => {
+        const byType = resolveIncomeType(a).localeCompare(resolveIncomeType(b))
+        return byType !== 0 ? byType : b.date - a.date
       })
-      if (sortKey === 'recent') return list.sort((a, b) => b.id - a.id)
       return list.sort((a, b) => b.date - a.date)
     },
     [visibleEntries, sortKey]
@@ -405,6 +402,7 @@ export function IncomeActual() {
 
   const periodTotal = periodEntries.reduce((sum, entry) => sum + entry.amount, 0)
   const visibleTotal = visibleEntries.reduce((sum, entry) => sum + entry.amount, 0)
+  const periodTipTotal = periodEntries.reduce((sum, entry) => sum + (entry.tip ?? 0), 0)
   const filteredTotalPresentation = incomeFilteredTotalPresentation(selectedTypes)
 
   function toggleType(type: string): void {
@@ -588,28 +586,20 @@ export function IncomeActual() {
                   <div className="text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400">Total Income</div>
                   <div className="mt-1 text-2xl font-semibold tracking-tight text-emerald-700 tabular-nums dark:text-emerald-300">{formatCurrency(periodTotal)}</div>
                 </div>
-                <div className={hasFilterSelection ? '' : 'invisible'} aria-hidden={!hasFilterSelection}>
-                  <div className="text-[10px] font-medium uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400">Filtered Income</div>
-                  <div className="mt-1 text-lg font-semibold tracking-tight tabular-nums" style={filteredTotalPresentation.style}>{formatCurrency(visibleTotal)}</div>
+                {hasFilterSelection ? (
+                  <div>
+                    <div className="text-[10px] font-medium uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400">Filtered Income</div>
+                    <div className="mt-1 text-lg font-semibold tracking-tight tabular-nums" style={filteredTotalPresentation.style}>{formatCurrency(visibleTotal)}</div>
+                  </div>
+                ) : null}
+                <div>
+                  <div className="text-[10px] font-medium uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400">Total Tips</div>
+                  <div className="mt-1 text-lg font-semibold tracking-tight text-emerald-700 tabular-nums dark:text-emerald-300">{formatCurrency(periodTipTotal)}</div>
                 </div>
               </div>
             </div>
             <div className="flex flex-col items-end gap-2">
               <div className="flex flex-wrap items-center gap-3">
-                <div ref={sortRef} className="relative">
-                  <button type="button" onClick={() => setSortOpen((value) => !value)} className="cursor-pointer rounded-full bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-200/80 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700">
-                    Sort: {INCOME_SORT_OPTIONS.find((option) => option.id === sortKey)?.label ?? 'Date'}
-                  </button>
-                  {sortOpen ? (
-                    <div role="menu" className="absolute right-0 z-30 mt-1 min-w-[11.5rem] rounded-lg border border-zinc-200/80 bg-white p-1 shadow-[0_4px_12px_rgba(0,0,0,0.12)] dark:border-zinc-600 dark:bg-zinc-900">
-                      {INCOME_SORT_OPTIONS.map((option) => (
-                        <button key={option.id} type="button" role="menuitem" onClick={() => { setSortKey(option.id); setSortOpen(false) }} className={`flex w-full rounded-md px-2.5 py-1.5 text-left text-[12px] font-medium transition-colors ${sortKey === option.id ? 'bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100' : 'text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-950'}`}>
-                          {option.label}
-                        </button>
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
                 <div className="inline-flex rounded-full bg-zinc-100 p-0.5 dark:bg-zinc-800" role="group" aria-label="Income period">
                   <SegmentedButton active={period === 'week'} onClick={() => setPeriod('week')}>Week</SegmentedButton>
                   <SegmentedButton active={period === 'month'} onClick={() => setPeriod('month')}>Month</SegmentedButton>
@@ -666,6 +656,20 @@ export function IncomeActual() {
                 </div>
                 <div className="pointer-events-none absolute left-1/2 top-2 flex -translate-x-1/2 items-center">
                   <button type="button" onClick={() => setAdding(true)} className="pointer-events-auto flex h-7 w-7 items-center justify-center rounded-full border border-zinc-200 bg-white text-zinc-500 shadow-sm transition-colors hover:border-zinc-300 hover:bg-zinc-50 hover:text-zinc-800 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-300 dark:shadow-none dark:hover:border-zinc-500 dark:hover:bg-zinc-800 dark:hover:text-zinc-100" aria-label="Add income"><PlusIcon /></button>
+                </div>
+                <div ref={sortRef} className="absolute right-12 top-2 md:right-[148px]">
+                  <button type="button" onClick={() => setSortOpen((value) => !value)} className="rounded-full bg-zinc-100 px-2.5 py-1 text-[11px] font-medium text-zinc-700 transition-colors hover:bg-zinc-200/80 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700" aria-haspopup="menu" aria-expanded={sortOpen}>
+                    Sort by: {INCOME_SORT_OPTIONS.find((option) => option.id === sortKey)?.label ?? 'Date'}
+                  </button>
+                  {sortOpen ? (
+                    <div role="menu" className="absolute right-0 z-30 mt-1 min-w-[11.5rem] rounded-lg border border-zinc-200/80 bg-white p-1 shadow-[0_4px_12px_rgba(0,0,0,0.12)] dark:border-zinc-600 dark:bg-zinc-900">
+                      {INCOME_SORT_OPTIONS.map((option) => (
+                        <button key={option.id} type="button" role="menuitem" onClick={() => { setSortKey(option.id); setSortOpen(false) }} className={`flex w-full rounded-md px-2.5 py-1.5 text-left text-[12px] font-medium transition-colors ${sortKey === option.id ? 'bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100' : 'text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-950'}`}>
+                          {option.label}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
                 <div className="flex min-w-0 flex-1 items-start justify-end gap-1">
                   {hasUndoActions ? (
@@ -1824,13 +1828,7 @@ function incomeFilteredTotalPresentation(types: string[]): { style: CSSPropertie
 }
 
 function incomeTypeColor(type: string): string {
-  const custom = readIncomeTypeColorHex(type)
-  if (custom) return custom
-  const tone = incomeTone(type)
-  if (tone === 'emerald') return '#059669'
-  if (tone === 'amber') return '#d97706'
-  if (tone === 'sky') return '#0284c7'
-  return '#7c3aed'
+  return resolveIncomeTypeColorHex(type)
 }
 
 function hexToRgb(hex: string): { red: number; green: number; blue: number } | null {

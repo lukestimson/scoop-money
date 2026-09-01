@@ -3,13 +3,19 @@ const INCOME_TYPE_COLORS_KEY = 'scoop_income_type_colors_v1'
 type HexOverrideMap = Record<string, string>
 
 const listeners = new Set<() => void>()
+const BUILT_IN_INCOME_TYPE_COLORS: Record<string, string> = {
+  snappr: '#059669',
+  thumbtack: '#d97706',
+  upwork: '#0284c7',
+  stimsonphoto: '#7c3aed'
+}
 
 function isValidHex6(value: string): boolean {
   return /^#[0-9a-fA-F]{6}$/.test(value)
 }
 
 function normalizeTypeKey(type: string): string {
-  return type.trim()
+  return type.trim().toLowerCase().replace(/[^a-z0-9]+/g, '')
 }
 
 function readOverrides(): HexOverrideMap {
@@ -73,10 +79,7 @@ export function readAllIncomeTypeColorHexes(): HexOverrideMap {
 
 function fallbackIncomeTypeColorHex(type: string): string {
   const normalized = normalizeTypeKey(type)
-  if (normalized === 'Snappr') return '#059669'
-  if (normalized === 'Thumbtack') return '#d97706'
-  if (normalized === 'Upwork') return '#0284c7'
-  return '#7c3aed'
+  return BUILT_IN_INCOME_TYPE_COLORS[normalized] ?? '#7c3aed'
 }
 
 export function resolveIncomeTypeColorHex(type: string): string {

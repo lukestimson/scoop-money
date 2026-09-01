@@ -1978,10 +1978,18 @@ export function deleteTransaction(id: number): void {
 }
 
 export function moveTransactionToIncome(id: number): IncomeEntry {
+  return moveTransactionToIncomeWithOptions(id)
+}
+
+export function moveTransactionToIncomeAsTip(id: number): IncomeEntry {
+  return moveTransactionToIncomeWithOptions(id, { isTip: true })
+}
+
+function moveTransactionToIncomeWithOptions(id: number, options: { isTip?: boolean } = {}): IncomeEntry {
   const db = getDb()
   const move = db.transaction((transactionId: number): IncomeEntry => {
     const transaction = getTransactionById(transactionId)
-    const income = createIncomeEntry(incomeDataFromPositiveTransaction(transaction))
+    const income = createIncomeEntry(incomeDataFromPositiveTransaction(transaction, options))
     const deleted = db.prepare('DELETE FROM transactions WHERE id = ?').run(transactionId)
     if (deleted.changes !== 1) throw new Error(`Transaction ${transactionId} could not be moved to income.`)
     return income

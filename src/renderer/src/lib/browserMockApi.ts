@@ -24,6 +24,8 @@ import { inferLineIsNeed } from '../../../types/budgetNeedRules'
 
 const now = Math.floor(Date.now() / 1000)
 const day = 86400
+const TRAILING_NAME_IN_PARENS = /^(.*?)(?:\s*)\(([^()]+)\)\s*$/u
+const PERSON_NAME_PATTERN = /^[\p{L}\p{M} .'-]+$/u
 
 let nextId = 1000
 const id = (): number => {
@@ -410,6 +412,20 @@ function income(
   }
 }
 
+function incomeFieldsFromTransaction(transaction: Transaction, isTip = false): Pick<IncomeEntry, 'shoot_name' | 'company' | 'tip'> {
+  const match = transaction.description.match(TRAILING_NAME_IN_PARENS)
+  const parenthesizedName = match?.[2]?.trim()
+  const hasName = Boolean(parenthesizedName && PERSON_NAME_PATTERN.test(parenthesizedName) && /\p{L}/u.test(parenthesizedName))
+  const baseSubject = hasName ? match?.[1]?.trim() || transaction.description : transaction.description
+  const shoot_name = isTip && !/\btip\b/i.test(baseSubject) ? `${baseSubject} tip`.trim() : baseSubject
+
+  return {
+    shoot_name,
+    company: hasName ? parenthesizedName! : '',
+    ...(isTip ? { tip: transaction.amount } : {})
+  }
+}
+
 function copy<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
 }
@@ -489,7 +505,19 @@ export function installBrowserMockApi(): void {
     moveTransactionToIncome: async (rowId) => {
       const transaction = transactions.find((row) => row.id === rowId)
       if (!transaction || transaction.amount <= 0) throw new Error('Only positive transactions can be moved to income.')
-      const row = income(transaction.date, transaction.description, '', transaction.amount, '')
+      const fields = incomeFieldsFromTransaction(transaction)
+      const row = income(transaction.date, fields.shoot_name, fields.company, transaction.amount, '')
+      row.notes = transaction.notes
+      incomeEntries = [row, ...incomeEntries]
+      transactions = transactions.filter((candidate) => candidate.id !== rowId)
+      return copy(row)
+    },
+    moveTransactionToIncomeAsTip: async (rowId) => {
+      const transaction = transactions.find((row) => row.id === rowId)
+      if (!transaction || transaction.amount <= 0) throw new Error('Only positive transactions can be moved to income.')
+      const fields = incomeFieldsFromTransaction(transaction, true)
+      const row = income(transaction.date, fields.shoot_name, fields.company, transaction.amount, '')
+      row.tip = fields.tip
       row.notes = transaction.notes
       incomeEntries = [row, ...incomeEntries]
       transactions = transactions.filter((candidate) => candidate.id !== rowId)

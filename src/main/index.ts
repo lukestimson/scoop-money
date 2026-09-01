@@ -30,6 +30,7 @@ import {
   getAllIncomeEntries,
   getAllTransactions,
   moveTransactionToIncome,
+  moveTransactionToIncomeAsTip,
   clearImportedFile,
   clearIncomeCandidateFlags,
   createImportTransactionRule,
@@ -189,6 +190,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle('transactions:update', (_event, id: number, data) => updateTransaction(id, data))
   ipcMain.handle('transactions:delete', (_event, id: number) => deleteTransaction(id))
   ipcMain.handle('transactions:moveToIncome', (_event, id: number) => moveTransactionToIncome(id))
+  ipcMain.handle('transactions:moveToIncomeAsTip', (_event, id: number) => moveTransactionToIncomeAsTip(id))
   ipcMain.handle('transactions:deleteMany', (_event, ids: number[]) => deleteTransactions(ids))
   ipcMain.handle('transactions:deleteAll', () => deleteAllTransactions())
   ipcMain.handle('transactions:import', (_event, filePath: string, accountId: number) =>

@@ -313,6 +313,7 @@ export interface MoneyAPI {
   updateTransaction(id: number, data: Partial<Transaction>): Promise<Transaction>
   deleteTransaction(id: number): Promise<void>
   moveTransactionToIncome(id: number): Promise<IncomeEntry>
+  moveTransactionToIncomeAsTip(id: number): Promise<IncomeEntry>
   deleteTransactions(ids: number[]): Promise<{ deleted: number }>
   deleteAllTransactions(): Promise<{ deleted: number }>
   importTransactions(filePath: string, accountId: number): Promise<ImportResult>

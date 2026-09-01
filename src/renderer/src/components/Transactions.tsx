@@ -1,383 +1,520 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
-import { addMonths, addWeeks, addYears, endOfMonth, endOfWeek, endOfYear, format, getDay, getDaysInMonth, startOfMonth, startOfWeek, startOfYear } from 'date-fns'
-import type { Account, BudgetItem, BudgetLineItem, ImportedFileRecord, IncomeEntry, Transaction } from '../../../types/money'
-import { parseLocalDateToUnix } from '../../../types/dateParsing'
-import { useAppContext } from '../context/AppContext'
-import { useDateFormat } from '../context/DateFormatContext'
-import { formatCurrency, parseCurrencyInput } from '../lib/currency'
-import { netSpendByCategory, netSpendCents } from '../lib/spending'
-import { getStoredBudgetType, loadStoredBudgetAidFilters, saveStoredBudgetAidFilters, subscribeBudgetAidFilters, type BudgetAidFilter } from '../lib/budget'
-import { BUDGET_CATEGORY_ORDER } from '../../../types/budgetCategories'
-import { GovAidIcon } from './BudgetAidIndicators'
-import { ChatBox } from './ChatBox'
-import { ListSectionSearchBar, type ListSearchPhase } from './ListSectionSearchBar'
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties, ReactNode } from "react";
+import {
+  addMonths,
+  addWeeks,
+  addYears,
+  endOfMonth,
+  endOfWeek,
+  endOfYear,
+  format,
+  getDay,
+  getDaysInMonth,
+  startOfMonth,
+  startOfWeek,
+  startOfYear,
+} from "date-fns";
+import type {
+  Account,
+  BudgetItem,
+  BudgetLineItem,
+  ImportedFileRecord,
+  IncomeEntry,
+  Transaction,
+} from "../../../types/money";
+import { parseLocalDateToUnix } from "../../../types/dateParsing";
+import { useAppContext } from "../context/AppContext";
+import { useDateFormat } from "../context/DateFormatContext";
+import { formatCurrency, parseCurrencyInput } from "../lib/currency";
+import { netSpendCents } from "../lib/spending";
+import {
+  getStoredBudgetType,
+  loadStoredBudgetAidFilters,
+  saveStoredBudgetAidFilters,
+  subscribeBudgetAidFilters,
+  type BudgetAidFilter,
+} from "../lib/budget";
+import { BUDGET_CATEGORY_ORDER } from "../../../types/budgetCategories";
+import { GovAidIcon } from "./BudgetAidIndicators";
+import { ChatBox } from "./ChatBox";
+import {
+  ListSectionSearchBar,
+  type ListSearchPhase,
+} from "./ListSectionSearchBar";
 
-type DisplayPeriod = 'week' | 'month' | 'year'
-type SortKey = 'date' | 'amount' | 'category' | 'recent'
+type DisplayPeriod = "week" | "month" | "year";
+type SortKey = "date" | "amount" | "account";
 
 interface UndoAction {
-  type: 'delete_one' | 'delete_all' | 'clear_file' | 'clear_all_files' | 'ignore_income' | 'delete_income' | 'move_to_income'
-  transactions: Transaction[]
-  files?: ImportedFileRecord[]
-  flaggedIds?: number[]
-  incomeEntries?: IncomeEntry[]
+  type:
+    | "delete_one"
+    | "delete_all"
+    | "clear_file"
+    | "clear_all_files"
+    | "ignore_income"
+    | "delete_income"
+    | "move_to_income";
+  transactions: Transaction[];
+  files?: ImportedFileRecord[];
+  flaggedIds?: number[];
+  incomeEntries?: IncomeEntry[];
 }
 
-const IMPORT_COLLAPSED_KEY = 'scoop_import_collapsed'
-const IMPORT_HELP_AUTO_CLOSE_MS = 10 * 60 * 1000
-const SORT_KEY = 'scoop_txn_sort'
+const IMPORT_COLLAPSED_KEY = "scoop_import_collapsed";
+const IMPORT_HELP_AUTO_CLOSE_MS = 10 * 60 * 1000;
+const SORT_KEY = "scoop_txn_sort";
 const IMPORT_HELP_POINTS = [
-  'Capital One: Statements & Docs -> Download Transactions -> CSV -> Select Custom Date Range',
-  'Venmo: Statements -> Select Month -> Download CSV',
-  'EBT: EBT Edge Mobile App -> Transactions -> Screenshot Transaction History'
-] as const
+  "Capital One: Statements & Docs -> Download Transactions -> CSV -> Select Custom Date Range",
+  "Venmo: Statements -> Select Month -> Download CSV",
+  "EBT: EBT Edge Mobile App -> Transactions -> Screenshot Transaction History",
+] as const;
 
 /** Same keys as Budget.tsx — read when building category pickers so Transactions stays in sync. */
-const BUDGET_CUSTOM_CATEGORIES_KEY = 'scoop_budget_custom_categories'
-const BUDGET_HIDDEN_CATEGORIES_KEY = 'scoop_budget_hidden_categories'
+const BUDGET_CUSTOM_CATEGORIES_KEY = "scoop_budget_custom_categories";
+const BUDGET_HIDDEN_CATEGORIES_KEY = "scoop_budget_hidden_categories";
 
 function loadBudgetCustomCategoriesForTxn(): string[] {
   try {
-    const raw = localStorage.getItem(BUDGET_CUSTOM_CATEGORIES_KEY)
+    const raw = localStorage.getItem(BUDGET_CUSTOM_CATEGORIES_KEY);
     if (raw) {
-      const parsed = JSON.parse(raw) as unknown
-      if (Array.isArray(parsed)) return parsed.map(String).filter(Boolean)
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) return parsed.map(String).filter(Boolean);
     }
   } catch {
     /* ignore */
   }
-  return []
+  return [];
 }
 
 function loadBudgetHiddenCategorySetForTxn(): Set<string> {
   try {
-    const raw = localStorage.getItem(BUDGET_HIDDEN_CATEGORIES_KEY)
+    const raw = localStorage.getItem(BUDGET_HIDDEN_CATEGORIES_KEY);
     if (raw) {
-      const parsed = JSON.parse(raw) as unknown
-      if (Array.isArray(parsed)) return new Set(parsed.map(String))
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) return new Set(parsed.map(String));
     }
   } catch {
     /* ignore */
   }
-  return new Set()
+  return new Set();
 }
 
 function isParentalGovBudgetLine(line: BudgetLineItem): boolean {
-  return line.section === 'Parental & Gov Help'
+  return line.section === "Parental & Gov Help";
 }
 
 function buildTransactionCategoryOptions(
   transactions: Transaction[],
   budgetLines: BudgetLineItem[],
-  budgetItems: BudgetItem[]
+  budgetItems: BudgetItem[],
 ): string[] {
-  const hidden = loadBudgetHiddenCategorySetForTxn()
-  const combined: string[] = []
-  const seen = new Set<string>()
+  const hidden = loadBudgetHiddenCategorySetForTxn();
+  const combined: string[] = [];
+  const seen = new Set<string>();
   for (const cat of BUDGET_CATEGORY_ORDER) {
-    if (hidden.has(cat)) continue
-    combined.push(cat)
-    seen.add(cat)
+    if (hidden.has(cat)) continue;
+    combined.push(cat);
+    seen.add(cat);
   }
   for (const cat of loadBudgetCustomCategoriesForTxn()) {
-    const t = cat.trim()
-    if (!t || seen.has(t)) continue
-    combined.push(t)
-    seen.add(t)
+    const t = cat.trim();
+    if (!t || seen.has(t)) continue;
+    combined.push(t);
+    seen.add(t);
   }
   for (const line of budgetLines) {
-    const c = line.category.trim()
-    if (!c || seen.has(c) || isParentalGovBudgetLine(line)) continue
-    combined.push(c)
-    seen.add(c)
+    const c = line.category.trim();
+    if (!c || seen.has(c) || isParentalGovBudgetLine(line)) continue;
+    combined.push(c);
+    seen.add(c);
   }
   for (const item of budgetItems) {
-    const c = item.category.trim()
-    if (!c || seen.has(c)) continue
-    combined.push(c)
-    seen.add(c)
+    const c = item.category.trim();
+    if (!c || seen.has(c)) continue;
+    combined.push(c);
+    seen.add(c);
   }
   for (const tx of transactions) {
-    const c = tx.mapped_category?.trim()
-    if (!c || seen.has(c)) continue
-    combined.push(c)
-    seen.add(c)
+    const c = tx.mapped_category?.trim();
+    if (!c || seen.has(c)) continue;
+    combined.push(c);
+    seen.add(c);
   }
-  const unc = 'Uncategorized'
+  const unc = "Uncategorized";
   if (!seen.has(unc)) {
-    combined.push(unc)
-    seen.add(unc)
+    combined.push(unc);
+    seen.add(unc);
   }
-  return combined.sort((a, b) => a.localeCompare(b))
+  return combined.sort((a, b) => a.localeCompare(b));
 }
 
 const SORT_OPTIONS: ReadonlyArray<{ id: SortKey; label: string }> = [
-  { id: 'date', label: 'Date' },
-  { id: 'amount', label: 'Amount' },
-  { id: 'category', label: 'Category' },
-  { id: 'recent', label: 'Recently Added' }
-]
+  { id: "date", label: "Date" },
+  { id: "account", label: "Account Type" },
+  { id: "amount", label: "Amount: High to Low" },
+];
 
-function periodBounds(anchor: Date, period: DisplayPeriod): { start: number; end: number } {
-  if (period === 'week') {
-    const s = startOfWeek(anchor, { weekStartsOn: 1 })
-    const e = endOfWeek(anchor, { weekStartsOn: 1 })
-    return { start: Math.floor(s.getTime() / 1000), end: Math.floor(e.getTime() / 1000) }
+function periodBounds(
+  anchor: Date,
+  period: DisplayPeriod,
+): { start: number; end: number } {
+  if (period === "week") {
+    const s = startOfWeek(anchor, { weekStartsOn: 1 });
+    const e = endOfWeek(anchor, { weekStartsOn: 1 });
+    return {
+      start: Math.floor(s.getTime() / 1000),
+      end: Math.floor(e.getTime() / 1000),
+    };
   }
-  if (period === 'year') {
-    const s = startOfYear(anchor)
-    const e = endOfYear(anchor)
-    return { start: Math.floor(s.getTime() / 1000), end: Math.floor(e.getTime() / 1000) }
+  if (period === "year") {
+    const s = startOfYear(anchor);
+    const e = endOfYear(anchor);
+    return {
+      start: Math.floor(s.getTime() / 1000),
+      end: Math.floor(e.getTime() / 1000),
+    };
   }
-  const s = startOfMonth(anchor)
-  const e = endOfMonth(anchor)
-  return { start: Math.floor(s.getTime() / 1000), end: Math.floor(e.getTime() / 1000) }
+  const s = startOfMonth(anchor);
+  const e = endOfMonth(anchor);
+  return {
+    start: Math.floor(s.getTime() / 1000),
+    end: Math.floor(e.getTime() / 1000),
+  };
 }
 
 function stepAnchor(anchor: Date, period: DisplayPeriod, dir: 1 | -1): Date {
-  if (period === 'week') return addWeeks(anchor, dir)
-  if (period === 'year') return addYears(anchor, dir)
-  return addMonths(anchor, dir)
+  if (period === "week") return addWeeks(anchor, dir);
+  if (period === "year") return addYears(anchor, dir);
+  return addMonths(anchor, dir);
 }
 
 function formatAnchor(anchor: Date, period: DisplayPeriod): string {
-  if (period === 'week') { const s = startOfWeek(anchor, { weekStartsOn: 1 }); return `${format(s, 'MMM d')} – ${format(endOfWeek(anchor, { weekStartsOn: 1 }), 'MMM d, yyyy')}` }
-  if (period === 'year') return format(anchor, 'yyyy')
-  return format(anchor, 'MMM yyyy')
+  if (period === "week") {
+    const s = startOfWeek(anchor, { weekStartsOn: 1 });
+    return `${format(s, "MMM d")} – ${format(endOfWeek(anchor, { weekStartsOn: 1 }), "MMM d, yyyy")}`;
+  }
+  if (period === "year") return format(anchor, "yyyy");
+  return format(anchor, "MMM yyyy");
+}
+
+function resolveTransactionCategory(
+  transaction: Pick<Transaction, "mapped_category">,
+): string {
+  return transaction.mapped_category?.trim() || "Uncategorized";
 }
 
 function getStoredSort(): SortKey {
-  const v = localStorage.getItem(SORT_KEY)
-  if (v === 'date' || v === 'amount' || v === 'category' || v === 'recent') return v
-  return 'date'
+  const v = localStorage.getItem(SORT_KEY);
+  if (v === "date" || v === "amount" || v === "account") return v;
+  if (v === "category") return "account";
+  return "date";
 }
 
 function isEbtAccount(account: Account | undefined): boolean {
-  if (!account) return false
-  return account.type === 'ebt' || account.name.toLowerCase().includes('ebt')
+  if (!account) return false;
+  return account.type === "ebt" || account.name.toLowerCase().includes("ebt");
 }
 
-function isEbtTransaction(tx: Transaction, accountsById: Map<number, Account>): boolean {
-  return tx.account_id != null && isEbtAccount(accountsById.get(tx.account_id))
+function isEbtTransaction(
+  tx: Transaction,
+  accountsById: Map<number, Account>,
+): boolean {
+  return tx.account_id != null && isEbtAccount(accountsById.get(tx.account_id));
 }
 
 function randomAccountColorHex(): string {
-  const hue = Math.floor(Math.random() * 360)
-  return hslToHex(hue, 70, 55)
+  const hue = Math.floor(Math.random() * 360);
+  return hslToHex(hue, 70, 55);
 }
 
 function hslToHex(h: number, s: number, l: number): string {
-  const sat = s / 100
-  const light = l / 100
-  const c = (1 - Math.abs(2 * light - 1)) * sat
-  const x = c * (1 - Math.abs((h / 60) % 2 - 1))
-  const m = light - c / 2
-  let r = 0
-  let g = 0
-  let b = 0
+  const sat = s / 100;
+  const light = l / 100;
+  const c = (1 - Math.abs(2 * light - 1)) * sat;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = light - c / 2;
+  let r = 0;
+  let g = 0;
+  let b = 0;
   if (h < 60) {
-    r = c
-    g = x
+    r = c;
+    g = x;
   } else if (h < 120) {
-    r = x
-    g = c
+    r = x;
+    g = c;
   } else if (h < 180) {
-    g = c
-    b = x
+    g = c;
+    b = x;
   } else if (h < 240) {
-    g = x
-    b = c
+    g = x;
+    b = c;
   } else if (h < 300) {
-    r = x
-    b = c
+    r = x;
+    b = c;
   } else {
-    r = c
-    b = x
+    r = c;
+    b = x;
   }
-  const toHex = (v: number): string => Math.round((v + m) * 255).toString(16).padStart(2, '0')
-  return `#${toHex(r)}${toHex(g)}${toHex(b)}`
+  const toHex = (v: number): string =>
+    Math.round((v + m) * 255)
+      .toString(16)
+      .padStart(2, "0");
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 }
 
 export function Transactions() {
-  const { dataVersion, bumpDataVersion, anchor, setAnchor, period, setPeriod } = useAppContext()
-  const { formatDate } = useDateFormat()
-  const [transactions, setTransactions] = useState<Transaction[]>([])
-  const [accounts, setAccounts] = useState<Account[]>([])
-  const [importedFiles, setImportedFiles] = useState<ImportedFileRecord[]>([])
-  const [budgetLineItems, setBudgetLineItems] = useState<BudgetLineItem[]>([])
-  const [budgetSheetItems, setBudgetSheetItems] = useState<BudgetItem[]>([])
-  const [aidFilters, setAidFilters] = useState<Set<BudgetAidFilter>>(() => loadStoredBudgetAidFilters())
-  const [selectedAccountIds, setSelectedAccountIds] = useState<number[]>([])
-  const [selectedCategories, setSelectedCategories] = useState<string[]>([])
-  const [sortKey, setSortKey] = useState<SortKey>(() => getStoredSort())
-  const [sortOpen, setSortOpen] = useState(false)
-  const [calendarOpen, setCalendarOpen] = useState(false)
-  const [adding, setAdding] = useState(false)
-  const [editMode, setEditMode] = useState(false)
-  const [contextMenu, setContextMenu] = useState<{ txId: number; x: number; y: number; confirming?: boolean } | null>(null)
-  const [fileContextMenu, setFileContextMenu] = useState<{ fileId: number; x: number; y: number } | null>(null)
-  const [deleteAllArmed, setDeleteAllArmed] = useState(false)
-  const [error, setError] = useState('')
-  const [importCollapsed, setImportCollapsed] = useState(() => localStorage.getItem(IMPORT_COLLAPSED_KEY) === 'true')
-  const [importHelpOpen, setImportHelpOpen] = useState(false)
-  const [hasUndoActions, setHasUndoActions] = useState(false)
-  const [txnSearchFieldOpen, setTxnSearchFieldOpen] = useState(false)
-  const [txnSearchQuery, setTxnSearchQuery] = useState('')
-  const [txnSearchPhase, setTxnSearchPhase] = useState<ListSearchPhase>(1)
-  const undoStackRef = useRef<UndoAction[]>([])
-  const inputRef = useRef<HTMLInputElement | null>(null)
-  const sortRef = useRef<HTMLDivElement>(null)
-  const calendarRef = useRef<HTMLDivElement>(null)
+  const { dataVersion, bumpDataVersion, anchor, setAnchor, period, setPeriod } =
+    useAppContext();
+  const { formatDate } = useDateFormat();
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [importedFiles, setImportedFiles] = useState<ImportedFileRecord[]>([]);
+  const [budgetLineItems, setBudgetLineItems] = useState<BudgetLineItem[]>([]);
+  const [budgetSheetItems, setBudgetSheetItems] = useState<BudgetItem[]>([]);
+  const [aidFilters, setAidFilters] = useState<Set<BudgetAidFilter>>(() =>
+    loadStoredBudgetAidFilters(),
+  );
+  const [selectedAccountIds, setSelectedAccountIds] = useState<number[]>([]);
+  const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
+  const [sortKey, setSortKey] = useState<SortKey>(() => getStoredSort());
+  const [sortOpen, setSortOpen] = useState(false);
+  const [calendarOpen, setCalendarOpen] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [editMode, setEditMode] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{
+    txId: number;
+    x: number;
+    y: number;
+    confirming?: boolean;
+  } | null>(null);
+  const [fileContextMenu, setFileContextMenu] = useState<{
+    fileId: number;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [deleteAllArmed, setDeleteAllArmed] = useState(false);
+  const [error, setError] = useState("");
+  const [importCollapsed, setImportCollapsed] = useState(
+    () => localStorage.getItem(IMPORT_COLLAPSED_KEY) === "true",
+  );
+  const [importHelpOpen, setImportHelpOpen] = useState(false);
+  const [hasUndoActions, setHasUndoActions] = useState(false);
+  const [txnSearchFieldOpen, setTxnSearchFieldOpen] = useState(false);
+  const [txnSearchQuery, setTxnSearchQuery] = useState("");
+  const [txnSearchPhase, setTxnSearchPhase] = useState<ListSearchPhase>(1);
+  const undoStackRef = useRef<UndoAction[]>([]);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const sortRef = useRef<HTMLDivElement>(null);
+  const calendarRef = useRef<HTMLDivElement>(null);
 
-  const { start, end } = periodBounds(anchor, period)
-  const govAidActive = aidFilters.has('government')
+  const { start, end } = periodBounds(anchor, period);
+  const govAidActive = aidFilters.has("government");
   const monthBoundsForImport = useMemo(() => {
-    const s = startOfMonth(anchor)
-    const e = endOfMonth(anchor)
-    return { start: Math.floor(s.getTime() / 1000), end: Math.floor(e.getTime() / 1000) }
-  }, [anchor])
+    const s = startOfMonth(anchor);
+    const e = endOfMonth(anchor);
+    return {
+      start: Math.floor(s.getTime() / 1000),
+      end: Math.floor(e.getTime() / 1000),
+    };
+  }, [anchor]);
 
-  useEffect(() => { localStorage.setItem(IMPORT_COLLAPSED_KEY, String(importCollapsed)) }, [importCollapsed])
-  useEffect(() => { localStorage.setItem(SORT_KEY, sortKey) }, [sortKey])
   useEffect(() => {
-    if (!importHelpOpen) return
-    const timer = window.setTimeout(() => setImportHelpOpen(false), IMPORT_HELP_AUTO_CLOSE_MS)
-    return () => window.clearTimeout(timer)
-  }, [importHelpOpen])
+    localStorage.setItem(IMPORT_COLLAPSED_KEY, String(importCollapsed));
+  }, [importCollapsed]);
   useEffect(() => {
-    if (!importHelpOpen) return
+    localStorage.setItem(SORT_KEY, sortKey);
+  }, [sortKey]);
+  useEffect(() => {
+    if (!importHelpOpen) return;
+    const timer = window.setTimeout(
+      () => setImportHelpOpen(false),
+      IMPORT_HELP_AUTO_CLOSE_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [importHelpOpen]);
+  useEffect(() => {
+    if (!importHelpOpen) return;
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') setImportHelpOpen(false)
+      if (event.key === "Escape") setImportHelpOpen(false);
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [importHelpOpen]);
+
+  useEffect(() => {
+    if (!sortOpen) return;
+    function onClickAway(e: MouseEvent): void {
+      if (sortRef.current && !sortRef.current.contains(e.target as Node))
+        setSortOpen(false);
     }
-    document.addEventListener('keydown', onKeyDown)
-    return () => document.removeEventListener('keydown', onKeyDown)
-  }, [importHelpOpen])
+    function onEsc(e: KeyboardEvent): void {
+      if (e.key === "Escape") setSortOpen(false);
+    }
+    document.addEventListener("pointerdown", onClickAway);
+    document.addEventListener("keydown", onEsc);
+    return () => {
+      document.removeEventListener("pointerdown", onClickAway);
+      document.removeEventListener("keydown", onEsc);
+    };
+  }, [sortOpen]);
 
   useEffect(() => {
-    if (!sortOpen) return
-    function onClickAway(e: MouseEvent): void { if (sortRef.current && !sortRef.current.contains(e.target as Node)) setSortOpen(false) }
-    function onEsc(e: KeyboardEvent): void { if (e.key === 'Escape') setSortOpen(false) }
-    document.addEventListener('pointerdown', onClickAway)
-    document.addEventListener('keydown', onEsc)
-    return () => { document.removeEventListener('pointerdown', onClickAway); document.removeEventListener('keydown', onEsc) }
-  }, [sortOpen])
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    document.addEventListener("pointerdown", close);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", close);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [contextMenu]);
 
   useEffect(() => {
-    if (!contextMenu) return
-    const close = () => setContextMenu(null)
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close() }
-    document.addEventListener('pointerdown', close)
-    document.addEventListener('keydown', onKey)
-    return () => { document.removeEventListener('pointerdown', close); document.removeEventListener('keydown', onKey) }
-  }, [contextMenu])
+    if (!fileContextMenu) return;
+    const close = () => setFileContextMenu(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    document.addEventListener("pointerdown", close);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", close);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [fileContextMenu]);
 
   useEffect(() => {
-    if (!fileContextMenu) return
-    const close = () => setFileContextMenu(null)
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close() }
-    document.addEventListener('pointerdown', close)
-    document.addEventListener('keydown', onKey)
-    return () => { document.removeEventListener('pointerdown', close); document.removeEventListener('keydown', onKey) }
-  }, [fileContextMenu])
-
-  useEffect(() => {
-    if (!calendarOpen) return
-    function onClickAway(e: MouseEvent): void { if (calendarRef.current && !calendarRef.current.contains(e.target as Node)) setCalendarOpen(false) }
-    function onEsc(e: KeyboardEvent): void { if (e.key === 'Escape') setCalendarOpen(false) }
-    document.addEventListener('pointerdown', onClickAway)
-    document.addEventListener('keydown', onEsc)
-    return () => { document.removeEventListener('pointerdown', onClickAway); document.removeEventListener('keydown', onEsc) }
-  }, [calendarOpen])
+    if (!calendarOpen) return;
+    function onClickAway(e: MouseEvent): void {
+      if (
+        calendarRef.current &&
+        !calendarRef.current.contains(e.target as Node)
+      )
+        setCalendarOpen(false);
+    }
+    function onEsc(e: KeyboardEvent): void {
+      if (e.key === "Escape") setCalendarOpen(false);
+    }
+    document.addEventListener("pointerdown", onClickAway);
+    document.addEventListener("keydown", onEsc);
+    return () => {
+      document.removeEventListener("pointerdown", onClickAway);
+      document.removeEventListener("keydown", onEsc);
+    };
+  }, [calendarOpen]);
 
   useEffect(() => {
     Promise.all([
       window.api.getAccounts(),
       window.api.getTransactions(),
-      window.api.getImportedFiles({ start: monthBoundsForImport.start, end: monthBoundsForImport.end }),
+      window.api.getImportedFiles({
+        start: monthBoundsForImport.start,
+        end: monthBoundsForImport.end,
+      }),
       window.api.getBudgetLineItems(),
-      window.api.getBudgetItems(getStoredBudgetType())
-    ]).then(([nextAccounts, nextTransactions, nextImportedFiles, lines, items]) => {
-      setAccounts(nextAccounts)
-      setTransactions(nextTransactions)
-      setImportedFiles(nextImportedFiles)
-      setBudgetLineItems(lines)
-      setBudgetSheetItems(items)
-    })
-  }, [dataVersion, monthBoundsForImport.end, monthBoundsForImport.start])
+      window.api.getBudgetItems(getStoredBudgetType()),
+    ]).then(
+      ([nextAccounts, nextTransactions, nextImportedFiles, lines, items]) => {
+        setAccounts(nextAccounts);
+        setTransactions(nextTransactions);
+        setImportedFiles(nextImportedFiles);
+        setBudgetLineItems(lines);
+        setBudgetSheetItems(items);
+      },
+    );
+  }, [dataVersion, monthBoundsForImport.end, monthBoundsForImport.start]);
 
   useEffect(() => {
-    return subscribeBudgetAidFilters(() => setAidFilters(loadStoredBudgetAidFilters()))
-  }, [])
+    return subscribeBudgetAidFilters(() =>
+      setAidFilters(loadStoredBudgetAidFilters()),
+    );
+  }, []);
 
   const accountsById = useMemo(() => {
-    const map = new Map<number, Account>()
-    for (const account of accounts) map.set(account.id, account)
-    return map
-  }, [accounts])
+    const map = new Map<number, Account>();
+    for (const account of accounts) map.set(account.id, account);
+    return map;
+  }, [accounts]);
 
   function toggleGovAid(): void {
-    const next = new Set(aidFilters)
-    if (next.has('government')) next.delete('government')
-    else next.add('government')
-    setAidFilters(next)
-    saveStoredBudgetAidFilters(next)
+    const next = new Set(aidFilters);
+    if (next.has("government")) next.delete("government");
+    else next.add("government");
+    setAidFilters(next);
+    saveStoredBudgetAidFilters(next);
   }
 
   const categories = useMemo(
-    () => buildTransactionCategoryOptions(transactions, budgetLineItems, budgetSheetItems),
-    [transactions, budgetLineItems, budgetSheetItems]
-  )
+    () =>
+      buildTransactionCategoryOptions(
+        transactions,
+        budgetLineItems,
+        budgetSheetItems,
+      ),
+    [transactions, budgetLineItems, budgetSheetItems],
+  );
+
+  const periodTransactions = useMemo(
+    () => transactions.filter((tx) => tx.date >= start && tx.date <= end),
+    [end, start, transactions],
+  );
 
   const visibleTransactions = useMemo(
     () =>
-      transactions.filter((tx) => {
-        if (tx.date < start || tx.date > end) return false
-        if (selectedAccountIds.length > 0 && (!tx.account_id || !selectedAccountIds.includes(tx.account_id))) return false
-        if (selectedCategories.length > 0 && !selectedCategories.includes(tx.mapped_category)) return false
-        return true
+      periodTransactions.filter((tx) => {
+        if (
+          selectedAccountIds.length > 0 &&
+          (!tx.account_id || !selectedAccountIds.includes(tx.account_id))
+        )
+          return false;
+        if (
+          selectedCategories.length > 0 &&
+          !selectedCategories.includes(resolveTransactionCategory(tx))
+        )
+          return false;
+        return true;
       }),
-    [end, selectedAccountIds, selectedCategories, start, transactions]
-  )
-
-  const categorySpendRank = useMemo(() => {
-    const totals = netSpendByCategory(
-      visibleTransactions.filter((tx) => !(govAidActive && isEbtTransaction(tx, accountsById)))
-    )
-    const sorted = [...totals.entries()].sort((a, b) => b[1] - a[1])
-    const rank = new Map<string, number>()
-    sorted.forEach(([cat], i) => rank.set(cat, i))
-    return rank
-  }, [accountsById, govAidActive, visibleTransactions])
+    [periodTransactions, selectedAccountIds, selectedCategories],
+  );
 
   const sortedTransactions = useMemo(() => {
-    const list = [...visibleTransactions]
-    if (sortKey === 'amount') return list.sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount))
-    if (sortKey === 'category') {
+    const list = [...visibleTransactions];
+    if (sortKey === "amount")
+      return list.sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount));
+    if (sortKey === "account") {
       return list.sort((a, b) => {
-        const ra = categorySpendRank.get(a.mapped_category || 'Uncategorized') ?? 999
-        const rb = categorySpendRank.get(b.mapped_category || 'Uncategorized') ?? 999
-        return ra !== rb ? ra - rb : b.date - a.date
-      })
+        const accountA = accountsById.get(a.account_id ?? -1);
+        const accountB = accountsById.get(b.account_id ?? -1);
+        const byType = (accountA?.type ?? "").localeCompare(accountB?.type ?? "");
+        if (byType !== 0) return byType;
+        const byName = (accountA?.name ?? "").localeCompare(accountB?.name ?? "");
+        return byName !== 0 ? byName : b.date - a.date;
+      });
     }
-    if (sortKey === 'recent') return list.sort((a, b) => b.id - a.id)
-    return list.sort((a, b) => b.date - a.date)
-  }, [categorySpendRank, sortKey, visibleTransactions])
+    return list.sort((a, b) => b.date - a.date);
+  }, [accountsById, sortKey, visibleTransactions]);
 
   const txnPhase1Filtered = useMemo(() => {
-    const q = txnSearchQuery.trim().toLowerCase()
-    if (!q) return sortedTransactions
-    return sortedTransactions.filter((tx) => (tx.description || '').toLowerCase().includes(q))
-  }, [sortedTransactions, txnSearchQuery])
+    const q = txnSearchQuery.trim().toLowerCase();
+    if (!q) return sortedTransactions;
+    return sortedTransactions.filter((tx) =>
+      (tx.description || "").toLowerCase().includes(q),
+    );
+  }, [sortedTransactions, txnSearchQuery]);
 
   const txnSearchFiltered = useMemo(() => {
-    const q = txnSearchQuery.trim().toLowerCase()
-    if (!q) return sortedTransactions
+    const q = txnSearchQuery.trim().toLowerCase();
+    if (!q) return sortedTransactions;
     if (txnSearchPhase === 1) {
-      return sortedTransactions.filter((tx) => (tx.description || '').toLowerCase().includes(q))
+      return sortedTransactions.filter((tx) =>
+        (tx.description || "").toLowerCase().includes(q),
+      );
     }
     return sortedTransactions.filter((tx) => {
-      const acct = accounts.find((a) => a.id === tx.account_id)?.name ?? ''
+      const acct = accounts.find((a) => a.id === tx.account_id)?.name ?? "";
       const blob = [
         tx.description,
         tx.mapped_category,
@@ -386,251 +523,429 @@ export function Transactions() {
         String(tx.amount),
         formatDate(tx.date),
         acct,
-        tx.source ?? '',
-        tx.notes ?? '',
-        tx.income_candidate ? 'income' : ''
+        tx.source ?? "",
+        tx.notes ?? "",
+        tx.income_candidate ? "income" : "",
       ]
-        .join(' ')
-        .toLowerCase()
-      return blob.includes(q)
-    })
-  }, [accounts, formatDate, sortedTransactions, txnSearchPhase, txnSearchQuery])
+        .join(" ")
+        .toLowerCase();
+      return blob.includes(q);
+    });
+  }, [
+    accounts,
+    formatDate,
+    sortedTransactions,
+    txnSearchPhase,
+    txnSearchQuery,
+  ]);
 
   const txnSearchShowEnterHint =
-    txnSearchFieldOpen && txnSearchPhase === 1 && Boolean(txnSearchQuery.trim()) && txnPhase1Filtered.length === 0
+    txnSearchFieldOpen &&
+    txnSearchPhase === 1 &&
+    Boolean(txnSearchQuery.trim()) &&
+    txnPhase1Filtered.length === 0;
 
   const handleTxnSearchKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
-      if (e.key !== 'Enter') return
-      e.preventDefault()
-      if (txnSearchPhase !== 1) return
-      const q = txnSearchQuery.trim()
-      if (!q) return
-      const any = sortedTransactions.some((tx) => (tx.description || '').toLowerCase().includes(q.toLowerCase()))
-      if (!any) setTxnSearchPhase(2)
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      if (txnSearchPhase !== 1) return;
+      const q = txnSearchQuery.trim();
+      if (!q) return;
+      const any = sortedTransactions.some((tx) =>
+        (tx.description || "").toLowerCase().includes(q.toLowerCase()),
+      );
+      if (!any) setTxnSearchPhase(2);
     },
-    [sortedTransactions, txnSearchPhase, txnSearchQuery]
-  )
+    [sortedTransactions, txnSearchPhase, txnSearchQuery],
+  );
 
   const totalSpent = useMemo(
     () =>
       netSpendCents(
-        visibleTransactions.filter((tx) => !(govAidActive && isEbtTransaction(tx, accountsById)))
+        periodTransactions.filter(
+          (tx) => !(govAidActive && isEbtTransaction(tx, accountsById)),
+        ),
       ),
-    [accountsById, govAidActive, visibleTransactions]
-  )
-  const contextMenuTransaction = contextMenu ? transactions.find((transaction) => transaction.id === contextMenu.txId) : null
+    [accountsById, govAidActive, periodTransactions],
+  );
+  const filteredSpent = useMemo(
+    () =>
+      netSpendCents(
+        visibleTransactions.filter(
+          (tx) => !(govAidActive && isEbtTransaction(tx, accountsById)),
+        ),
+      ),
+    [accountsById, govAidActive, visibleTransactions],
+  );
+  const filteredSpentPresentation = useMemo(
+    () =>
+      transactionFilteredTotalPresentation(
+        selectedAccountIds,
+        selectedCategories,
+        accountsById,
+      ),
+    [accountsById, selectedAccountIds, selectedCategories],
+  );
+  const contextMenuTransaction = contextMenu
+    ? transactions.find((transaction) => transaction.id === contextMenu.txId)
+    : null;
 
   function pushUndo(action: UndoAction): void {
-    undoStackRef.current.push(action)
-    setHasUndoActions(true)
+    undoStackRef.current.push(action);
+    setHasUndoActions(true);
   }
 
   const undoLastAction = useCallback(async () => {
-    const action = undoStackRef.current.pop()
-    if (!action) return
-    if (undoStackRef.current.length === 0) setHasUndoActions(false)
-    if (action.type === 'ignore_income' && action.flaggedIds?.length) {
+    const action = undoStackRef.current.pop();
+    if (!action) return;
+    if (undoStackRef.current.length === 0) setHasUndoActions(false);
+    if (action.type === "ignore_income" && action.flaggedIds?.length) {
       for (const id of action.flaggedIds) {
-        await window.api.updateTransaction(id, { income_candidate: true })
+        await window.api.updateTransaction(id, { income_candidate: true });
       }
-    } else if (action.type === 'move_to_income') {
-      for (const income of action.incomeEntries ?? []) await window.api.deleteIncomeEntry(income.id)
+    } else if (action.type === "move_to_income") {
+      for (const income of action.incomeEntries ?? [])
+        await window.api.deleteIncomeEntry(income.id);
       for (const tx of action.transactions) {
         await window.api.createTransaction({
-          date: tx.date, description: tx.description, amount: tx.amount,
-          mapped_category: tx.mapped_category, raw_category: tx.raw_category ?? tx.mapped_category,
-          account_id: tx.account_id ?? null, source: tx.source ?? 'manual', notes: tx.notes,
-          income_candidate: tx.income_candidate, external_id: tx.external_id
-        })
+          date: tx.date,
+          description: tx.description,
+          amount: tx.amount,
+          mapped_category: tx.mapped_category,
+          raw_category: tx.raw_category ?? tx.mapped_category,
+          account_id: tx.account_id ?? null,
+          source: tx.source ?? "manual",
+          notes: tx.notes,
+          income_candidate: tx.income_candidate,
+          external_id: tx.external_id,
+        });
       }
-    } else if (action.type === 'delete_income') {
+    } else if (action.type === "delete_income") {
       for (const tx of action.transactions) {
         await window.api.createTransaction({
-          date: tx.date, description: tx.description, amount: tx.amount,
-          mapped_category: tx.mapped_category, raw_category: tx.raw_category ?? tx.mapped_category,
-          account_id: tx.account_id ?? null, source: tx.source ?? 'manual', income_candidate: true
-        })
+          date: tx.date,
+          description: tx.description,
+          amount: tx.amount,
+          mapped_category: tx.mapped_category,
+          raw_category: tx.raw_category ?? tx.mapped_category,
+          account_id: tx.account_id ?? null,
+          source: tx.source ?? "manual",
+          income_candidate: true,
+        });
       }
     } else {
       for (const tx of action.transactions) {
         await window.api.createTransaction({
-          date: tx.date, description: tx.description, amount: tx.amount,
-          mapped_category: tx.mapped_category, raw_category: tx.raw_category ?? tx.mapped_category,
-          account_id: tx.account_id ?? null, source: tx.source ?? 'manual'
-        })
+          date: tx.date,
+          description: tx.description,
+          amount: tx.amount,
+          mapped_category: tx.mapped_category,
+          raw_category: tx.raw_category ?? tx.mapped_category,
+          account_id: tx.account_id ?? null,
+          source: tx.source ?? "manual",
+        });
       }
     }
-    bumpDataVersion()
-  }, [bumpDataVersion])
+    bumpDataVersion();
+  }, [bumpDataVersion]);
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent): void {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
-        e.preventDefault()
-        void undoLastAction()
+      if ((e.metaKey || e.ctrlKey) && e.key === "z" && !e.shiftKey) {
+        e.preventDefault();
+        void undoLastAction();
       }
     }
-    document.addEventListener('keydown', onKeyDown)
-    return () => document.removeEventListener('keydown', onKeyDown)
-  }, [undoLastAction])
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [undoLastAction]);
 
   async function importFile(file: File): Promise<void> {
-    const path = window.api.getPathForFile(file)
-    setError('')
-    if (!path) { setError('Could not read the selected file path.'); return }
-    const targetAccountId = selectedAccountIds[0] ?? accounts[0]?.id
-    if (!targetAccountId) { setError('Create an account before importing transactions.'); return }
-    const result = await window.api.importTransactions(path, targetAccountId)
-    setError(result.errors[0] ?? '')
+    const path = window.api.getPathForFile(file);
+    setError("");
+    if (!path) {
+      setError("Could not read the selected file path.");
+      return;
+    }
+    const targetAccountId = selectedAccountIds[0] ?? accounts[0]?.id;
+    if (!targetAccountId) {
+      setError("Create an account before importing transactions.");
+      return;
+    }
+    const result = await window.api.importTransactions(path, targetAccountId);
+    setError(result.errors[0] ?? "");
     const [nextTransactions, nextImportedFiles] = await Promise.all([
       window.api.getTransactions(),
-      window.api.getImportedFiles({ start: monthBoundsForImport.start, end: monthBoundsForImport.end })
-    ])
-    setTransactions(nextTransactions)
-    setImportedFiles(nextImportedFiles)
-    bumpDataVersion()
+      window.api.getImportedFiles({
+        start: monthBoundsForImport.start,
+        end: monthBoundsForImport.end,
+      }),
+    ]);
+    setTransactions(nextTransactions);
+    setImportedFiles(nextImportedFiles);
+    bumpDataVersion();
   }
 
   function toggleAccount(id: number): void {
-    setSelectedAccountIds((c) => c.includes(id) ? c.filter((i) => i !== id) : [...c, id])
+    setSelectedAccountIds((c) =>
+      c.includes(id) ? c.filter((i) => i !== id) : [...c, id],
+    );
   }
   function toggleCategory(cat: string): void {
-    setSelectedCategories((c) => c.includes(cat) ? c.filter((i) => i !== cat) : [...c, cat])
+    setSelectedCategories((c) =>
+      c.includes(cat) ? c.filter((i) => i !== cat) : [...c, cat],
+    );
   }
 
   async function deleteTransaction(id: number): Promise<void> {
-    const tx = transactions.find((t) => t.id === id)
-    if (tx) pushUndo({ type: 'delete_one', transactions: [tx] })
-    await window.api.deleteTransaction(id)
-    bumpDataVersion()
+    const tx = transactions.find((t) => t.id === id);
+    if (tx) pushUndo({ type: "delete_one", transactions: [tx] });
+    await window.api.deleteTransaction(id);
+    bumpDataVersion();
   }
 
   async function moveTransactionToIncome(id: number): Promise<void> {
-    const transaction = transactions.find((item) => item.id === id)
-    if (!transaction || transaction.amount <= 0) return
-    setError('')
+    const transaction = transactions.find((item) => item.id === id);
+    if (!transaction || transaction.amount <= 0) return;
+    setError("");
     try {
-      const income = await window.api.moveTransactionToIncome(id)
-      pushUndo({ type: 'move_to_income', transactions: [transaction], incomeEntries: [income] })
-      bumpDataVersion()
+      const income = await window.api.moveTransactionToIncome(id);
+      pushUndo({
+        type: "move_to_income",
+        transactions: [transaction],
+        incomeEntries: [income],
+      });
+      bumpDataVersion();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function moveTransactionToIncomeAsTip(id: number): Promise<void> {
+    const transaction = transactions.find((item) => item.id === id);
+    if (!transaction || transaction.amount <= 0) return;
+    setError("");
+    try {
+      const income = await window.api.moveTransactionToIncomeAsTip(id);
+      pushUndo({
+        type: "move_to_income",
+        transactions: [transaction],
+        incomeEntries: [income],
+      });
+      bumpDataVersion();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
     }
   }
 
   async function deleteAllTransactions(): Promise<void> {
-    if (!deleteAllArmed) { setDeleteAllArmed(true); window.setTimeout(() => setDeleteAllArmed(false), 3500); return }
-    pushUndo({ type: 'delete_all', transactions: [...visibleTransactions] })
-    for (const tx of visibleTransactions) {
-      await window.api.deleteTransaction(tx.id)
+    if (!deleteAllArmed) {
+      setDeleteAllArmed(true);
+      window.setTimeout(() => setDeleteAllArmed(false), 3500);
+      return;
     }
-    setDeleteAllArmed(false)
-    bumpDataVersion()
+    pushUndo({ type: "delete_all", transactions: [...visibleTransactions] });
+    for (const tx of visibleTransactions) {
+      await window.api.deleteTransaction(tx.id);
+    }
+    setDeleteAllArmed(false);
+    bumpDataVersion();
   }
 
   async function clearImportedFile(fileId: number): Promise<void> {
-    const file = importedFiles.find((f) => f.id === fileId)
-    if (!file) return
-    const result = await window.api.clearImportedFile(fileId)
-    pushUndo({ type: 'clear_file', transactions: result.transactions, files: [file] })
-    bumpDataVersion()
+    const file = importedFiles.find((f) => f.id === fileId);
+    if (!file) return;
+    const result = await window.api.clearImportedFile(fileId);
+    pushUndo({
+      type: "clear_file",
+      transactions: result.transactions,
+      files: [file],
+    });
+    bumpDataVersion();
   }
 
   async function clearAllImportedFiles(): Promise<void> {
-    const allTx: Transaction[] = []
-    const allFiles: ImportedFileRecord[] = [...importedFiles]
+    const allTx: Transaction[] = [];
+    const allFiles: ImportedFileRecord[] = [...importedFiles];
     for (const file of importedFiles) {
-      const result = await window.api.clearImportedFile(file.id)
-      allTx.push(...result.transactions)
+      const result = await window.api.clearImportedFile(file.id);
+      allTx.push(...result.transactions);
     }
     if (allFiles.length > 0) {
-      pushUndo({ type: 'clear_all_files', transactions: allTx, files: allFiles })
+      pushUndo({
+        type: "clear_all_files",
+        transactions: allTx,
+        files: allFiles,
+      });
     }
-    bumpDataVersion()
+    bumpDataVersion();
   }
 
   const incomeFlaggedTx = useMemo(
     () => txnSearchFiltered.filter((tx) => tx.income_candidate),
-    [txnSearchFiltered]
-  )
+    [txnSearchFiltered],
+  );
 
   async function ignoreIncomeFlags(): Promise<void> {
-    const ids = incomeFlaggedTx.map((tx) => tx.id)
-    if (ids.length === 0) return
-    await window.api.clearIncomeCandidateFlags(ids)
-    pushUndo({ type: 'ignore_income', transactions: [], flaggedIds: ids })
-    bumpDataVersion()
+    const ids = incomeFlaggedTx.map((tx) => tx.id);
+    if (ids.length === 0) return;
+    await window.api.clearIncomeCandidateFlags(ids);
+    pushUndo({ type: "ignore_income", transactions: [], flaggedIds: ids });
+    bumpDataVersion();
   }
 
   async function deleteIncomeTransactions(): Promise<void> {
-    const toDelete = [...incomeFlaggedTx]
-    if (toDelete.length === 0) return
-    pushUndo({ type: 'delete_income', transactions: toDelete })
+    const toDelete = [...incomeFlaggedTx];
+    if (toDelete.length === 0) return;
+    pushUndo({ type: "delete_income", transactions: toDelete });
     for (const tx of toDelete) {
-      await window.api.deleteTransaction(tx.id)
+      await window.api.deleteTransaction(tx.id);
     }
-    bumpDataVersion()
+    bumpDataVersion();
   }
 
-  const handleAddDone = useCallback((created: boolean) => {
-    setAdding(false)
-    if (created) bumpDataVersion()
-  }, [bumpDataVersion])
+  const handleAddDone = useCallback(
+    (created: boolean) => {
+      setAdding(false);
+      if (created) bumpDataVersion();
+    },
+    [bumpDataVersion],
+  );
+
+  const hasFilterSelection =
+    selectedAccountIds.length > 0 || selectedCategories.length > 0;
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-white dark:bg-zinc-950">
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-6 md:px-8">
-        <input ref={inputRef} type="file" accept=".csv,.xls,.xlsx" className="hidden" onChange={(event) => { const input = event.currentTarget; const file = input.files?.[0]; if (file) { void importFile(file).finally(() => { input.value = '' }) } else { input.value = '' } }} />
+        <input
+          ref={inputRef}
+          type="file"
+          accept=".csv,.xls,.xlsx"
+          className="hidden"
+          onChange={(event) => {
+            const input = event.currentTarget;
+            const file = input.files?.[0];
+            if (file) {
+              void importFile(file).finally(() => {
+                input.value = "";
+              });
+            } else {
+              input.value = "";
+            }
+          }}
+        />
 
         {/* Header — full width */}
         <div className="mb-5 flex flex-wrap items-start justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">Transactions</h1>
-            <div className="mt-2 text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400">Total Spent</div>
-            <div className="mt-1 flex items-center gap-2 text-2xl font-semibold tracking-tight text-zinc-900 tabular-nums dark:text-zinc-100">
-              {formatCurrency(totalSpent)}
-              {govAidActive ? <GovAidIcon /> : null}
+            <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
+              Transactions
+            </h1>
+            <div className="mt-2 flex items-end gap-6">
+              <div>
+                <div className="text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400">
+                  Total Spent
+                </div>
+                <div className="mt-1 flex items-center gap-2 text-2xl font-semibold tracking-tight text-zinc-900 tabular-nums dark:text-zinc-100">
+                  {formatCurrency(totalSpent)}
+                  {govAidActive ? <GovAidIcon /> : null}
+                </div>
+              </div>
+              <div
+                className={hasFilterSelection ? "" : "invisible"}
+                aria-hidden={!hasFilterSelection}
+              >
+                <div className="text-[10px] font-medium uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400">
+                  Filtered Spent
+                </div>
+                <div
+                  className="mt-1 text-lg font-semibold tracking-tight tabular-nums"
+                  style={filteredSpentPresentation.style}
+                >
+                  {formatCurrency(filteredSpent)}
+                </div>
+              </div>
             </div>
           </div>
           <div className="flex flex-col items-end gap-2">
             <div className="flex flex-wrap items-center gap-3">
-              <div ref={sortRef} className="relative">
-                <button type="button" onClick={() => setSortOpen((v) => !v)} className="cursor-pointer rounded-full bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-200/80 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700">
-                  Sort: {SORT_OPTIONS.find((o) => o.id === sortKey)?.label ?? 'Date'}
-                </button>
-                {sortOpen && (
-                  <div role="menu" className="absolute right-0 z-30 mt-1 min-w-[11.5rem] rounded-lg border border-zinc-200/80 bg-white p-1 shadow-[0_4px_12px_rgba(0,0,0,0.12)] dark:border-zinc-600 dark:bg-zinc-900">
-                    {SORT_OPTIONS.map((opt) => (
-                      <button key={opt.id} type="button" role="menuitem" onClick={() => { setSortKey(opt.id); setSortOpen(false) }} className={`flex w-full rounded-md px-2.5 py-1.5 text-left text-[12px] font-medium transition-colors ${sortKey === opt.id ? 'bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100' : 'text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-950'}`}>
-                        {opt.label}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-              <div className="inline-flex rounded-full bg-zinc-100 p-0.5 dark:bg-zinc-800" role="group" aria-label="Display period">
-                <SegmentedButton active={period === 'week'} onClick={() => setPeriod('week')}>Week</SegmentedButton>
-                <SegmentedButton active={period === 'month'} onClick={() => setPeriod('month')}>Month</SegmentedButton>
-                <SegmentedButton active={period === 'year'} onClick={() => setPeriod('year')}>Year</SegmentedButton>
+              <div
+                className="inline-flex rounded-full bg-zinc-100 p-0.5 dark:bg-zinc-800"
+                role="group"
+                aria-label="Display period"
+              >
+                <SegmentedButton
+                  active={period === "week"}
+                  onClick={() => setPeriod("week")}
+                >
+                  Week
+                </SegmentedButton>
+                <SegmentedButton
+                  active={period === "month"}
+                  onClick={() => setPeriod("month")}
+                >
+                  Month
+                </SegmentedButton>
+                <SegmentedButton
+                  active={period === "year"}
+                  onClick={() => setPeriod("year")}
+                >
+                  Year
+                </SegmentedButton>
               </div>
             </div>
             <div ref={calendarRef} className="relative">
               <div className="flex items-center rounded-full border border-zinc-200 bg-white text-sm shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
-                <button type="button" onClick={() => setAnchor((a) => stepAnchor(a, period, -1))} className="px-3 py-1.5 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100" aria-label="Previous">
-                  <span className="inline-block -rotate-90"><ChevronIcon direction="up" /></span>
+                <button
+                  type="button"
+                  onClick={() => setAnchor((a) => stepAnchor(a, period, -1))}
+                  className="px-3 py-1.5 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"
+                  aria-label="Previous"
+                >
+                  <span className="inline-block -rotate-90">
+                    <ChevronIcon direction="up" />
+                  </span>
                 </button>
-                <div className="min-w-[120px] text-center text-[12px] font-medium text-zinc-700 dark:text-zinc-200">{formatAnchor(anchor, period)}</div>
-                <button type="button" onClick={() => setCalendarOpen((v) => !v)} className="px-1 text-zinc-400 transition-colors hover:text-zinc-700 dark:text-zinc-500 dark:hover:text-zinc-200" aria-label="Open calendar"><CalendarIcon /></button>
-                <button type="button" onClick={() => setAnchor((a) => stepAnchor(a, period, 1))} className="px-3 py-1.5 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100" aria-label="Next">
-                  <span className="inline-block rotate-90"><ChevronIcon direction="up" /></span>
+                <div className="min-w-[120px] text-center text-[12px] font-medium text-zinc-700 dark:text-zinc-200">
+                  {formatAnchor(anchor, period)}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setCalendarOpen((v) => !v)}
+                  className="px-1 text-zinc-400 transition-colors hover:text-zinc-700 dark:text-zinc-500 dark:hover:text-zinc-200"
+                  aria-label="Open calendar"
+                >
+                  <CalendarIcon />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAnchor((a) => stepAnchor(a, period, 1))}
+                  className="px-3 py-1.5 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"
+                  aria-label="Next"
+                >
+                  <span className="inline-block rotate-90">
+                    <ChevronIcon direction="up" />
+                  </span>
                 </button>
               </div>
               {calendarOpen && (
-                <CalendarDropdown period={period} anchor={anchor} onSelect={(d) => { setAnchor(d); setCalendarOpen(false) }} />
+                <CalendarDropdown
+                  period={period}
+                  anchor={anchor}
+                  onSelect={(d) => {
+                    setAnchor(d);
+                    setCalendarOpen(false);
+                  }}
+                />
               )}
             </div>
-            <div className="inline-flex rounded-full bg-zinc-100 p-0.5 dark:bg-zinc-800" role="group" aria-label="Aid filters">
+            <div
+              className="inline-flex rounded-full bg-zinc-100 p-0.5 dark:bg-zinc-800"
+              role="group"
+              aria-label="Aid filters"
+            >
               <button
                 type="button"
                 aria-pressed={govAidActive}
@@ -639,8 +954,8 @@ export function Transactions() {
                 onClick={toggleGovAid}
                 className={`flex h-7 min-w-7 items-center justify-center rounded-full px-2 text-xs font-medium transition-colors ${
                   govAidActive
-                    ? 'bg-amber-100 text-amber-900 shadow-sm dark:bg-amber-950/60 dark:text-amber-100'
-                    : 'text-zinc-500 dark:text-zinc-400'
+                    ? "bg-amber-100 text-amber-900 shadow-sm dark:bg-amber-950/60 dark:text-amber-100"
+                    : "text-zinc-500 dark:text-zinc-400"
                 }`}
               >
                 <GovAidIcon />
@@ -650,20 +965,30 @@ export function Transactions() {
         </div>
 
         {/* Import section — full width */}
-        <div className="relative z-20 mb-5 rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-700 dark:bg-zinc-900" style={{ overflow: 'visible' }}>
+        <div
+          className="relative z-20 mb-5 rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-700 dark:bg-zinc-900"
+          style={{ overflow: "visible" }}
+        >
           <div className="flex items-center justify-between px-3 py-2.5">
-            <span className="text-[12px] font-semibold text-zinc-900 dark:text-zinc-100">Import Transactions</span>
+            <span className="text-[12px] font-semibold text-zinc-900 dark:text-zinc-100">
+              Import Transactions
+            </span>
             <div className="flex items-center gap-2">
-              <span className="text-[11px] font-medium tabular-nums text-zinc-500 dark:text-zinc-400">{importedFiles.length} file{importedFiles.length !== 1 ? 's' : ''} imported</span>
+              <span className="text-[11px] font-medium tabular-nums text-zinc-500 dark:text-zinc-400">
+                {importedFiles.length} file
+                {importedFiles.length !== 1 ? "s" : ""} imported
+              </span>
               <button
                 type="button"
                 onClick={() => setImportHelpOpen((value) => !value)}
                 className={`inline-flex h-5 w-5 items-center justify-center rounded-full border transition-colors ${
                   importHelpOpen
-                    ? 'border-red-200 text-red-500 hover:border-red-300 hover:text-red-600 dark:border-red-900 dark:text-red-400 dark:hover:border-red-800 dark:hover:text-red-300'
-                    : 'border-zinc-200 text-zinc-400 hover:border-zinc-300 hover:text-zinc-700 dark:border-zinc-700 dark:text-zinc-500 dark:hover:border-zinc-600 dark:hover:text-zinc-200'
+                    ? "border-red-200 text-red-500 hover:border-red-300 hover:text-red-600 dark:border-red-900 dark:text-red-400 dark:hover:border-red-800 dark:hover:text-red-300"
+                    : "border-zinc-200 text-zinc-400 hover:border-zinc-300 hover:text-zinc-700 dark:border-zinc-700 dark:text-zinc-500 dark:hover:border-zinc-600 dark:hover:text-zinc-200"
                 }`}
-                aria-label={importHelpOpen ? 'Close import help' : 'Import help'}
+                aria-label={
+                  importHelpOpen ? "Close import help" : "Import help"
+                }
               >
                 {importHelpOpen ? <XIcon /> : <QuestionMarkIcon />}
               </button>
@@ -676,9 +1001,12 @@ export function Transactions() {
                   <div className="flex min-h-[62px] w-[560px] shrink-0 flex-col justify-between rounded-lg border border-zinc-200 bg-zinc-50/80 px-4 py-3 dark:border-zinc-700 dark:bg-zinc-950/50">
                     <ul className="space-y-1.5 text-[11px] leading-4 text-zinc-600 dark:text-zinc-300">
                       {IMPORT_HELP_POINTS.map((point) => (
-                        <li key={point} className="flex items-start gap-2 whitespace-nowrap">
+                        <li
+                          key={point}
+                          className="flex items-start gap-2 whitespace-nowrap"
+                        >
                           <span className="mt-[3px] h-1 w-1 shrink-0 rounded-full bg-zinc-400 dark:bg-zinc-500" />
-                          <span>{point.replaceAll('->', '→')}</span>
+                          <span>{point.replaceAll("->", "→")}</span>
                         </li>
                       ))}
                     </ul>
@@ -693,23 +1021,54 @@ export function Transactions() {
                     </div>
                   </div>
                 ) : (
-                  <button type="button" onClick={() => inputRef.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); const file = e.dataTransfer.files[0]; if (file) void importFile(file) }} className="flex min-h-[62px] w-[260px] shrink-0 items-center justify-center rounded-lg border border-dashed border-zinc-300 bg-zinc-50 px-4 text-[12px] font-medium text-zinc-500 transition-colors hover:border-zinc-400 hover:bg-white hover:text-zinc-700 dark:border-zinc-700 dark:bg-zinc-950/50 dark:text-zinc-400 dark:hover:border-zinc-600 dark:hover:bg-zinc-900 dark:hover:text-zinc-200">
+                  <button
+                    type="button"
+                    onClick={() => inputRef.current?.click()}
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      const file = e.dataTransfer.files[0];
+                      if (file) void importFile(file);
+                    }}
+                    className="flex min-h-[62px] w-[260px] shrink-0 items-center justify-center rounded-lg border border-dashed border-zinc-300 bg-zinc-50 px-4 text-[12px] font-medium text-zinc-500 transition-colors hover:border-zinc-400 hover:bg-white hover:text-zinc-700 dark:border-zinc-700 dark:bg-zinc-950/50 dark:text-zinc-400 dark:hover:border-zinc-600 dark:hover:bg-zinc-900 dark:hover:text-zinc-200"
+                  >
                     Drop CSV or Excel here
                   </button>
                 )}
                 <div className="min-w-0 flex-1">
                   {importedFiles.length === 0 ? (
-                    <span className="block text-right text-[12px] text-zinc-500 dark:text-zinc-400">No files for this month</span>
+                    <span className="block text-right text-[12px] text-zinc-500 dark:text-zinc-400">
+                      No files for this month
+                    </span>
                   ) : (
                     <div className="flex flex-col gap-1">
-                      {importedFiles.map((file) => <ImportedFileEntry key={file.id} file={file} formatDate={formatDate} onContextMenu={(e) => { e.preventDefault(); setFileContextMenu({ fileId: file.id, x: e.clientX, y: e.clientY }) }} />)}
+                      {importedFiles.map((file) => (
+                        <ImportedFileEntry
+                          key={file.id}
+                          file={file}
+                          formatDate={formatDate}
+                          onContextMenu={(e) => {
+                            e.preventDefault();
+                            setFileContextMenu({
+                              fileId: file.id,
+                              x: e.clientX,
+                              y: e.clientY,
+                            });
+                          }}
+                        />
+                      ))}
                     </div>
                   )}
                 </div>
               </div>
             </div>
           )}
-          <button type="button" onClick={() => setImportCollapsed((v) => !v)} className="flex w-full items-center justify-center border-t border-zinc-100 py-1 text-zinc-400 transition-colors hover:bg-zinc-50 hover:text-zinc-600 dark:border-zinc-800 dark:hover:bg-zinc-950 dark:hover:text-zinc-300" aria-label={importCollapsed ? 'Expand' : 'Collapse'}>
+          <button
+            type="button"
+            onClick={() => setImportCollapsed((v) => !v)}
+            className="flex w-full items-center justify-center border-t border-zinc-100 py-1 text-zinc-400 transition-colors hover:bg-zinc-50 hover:text-zinc-600 dark:border-zinc-800 dark:hover:bg-zinc-950 dark:hover:text-zinc-300"
+            aria-label={importCollapsed ? "Expand" : "Collapse"}
+          >
             <CollapseChevron collapsed={importCollapsed} />
           </button>
         </div>
@@ -720,11 +1079,27 @@ export function Transactions() {
             style={{ left: fileContextMenu.x, top: fileContextMenu.y }}
             onPointerDown={(e) => e.stopPropagation()}
           >
-            <button type="button" onClick={async () => { await clearImportedFile(fileContextMenu.fileId); setFileContextMenu(null) }} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-zinc-700 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-800">
-              <XIcon />Clear
+            <button
+              type="button"
+              onClick={async () => {
+                await clearImportedFile(fileContextMenu.fileId);
+                setFileContextMenu(null);
+              }}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-zinc-700 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-800"
+            >
+              <XIcon />
+              Clear
             </button>
-            <button type="button" onClick={async () => { await clearAllImportedFiles(); setFileContextMenu(null) }} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30">
-              <XIcon />Clear All
+            <button
+              type="button"
+              onClick={async () => {
+                await clearAllImportedFiles();
+                setFileContextMenu(null);
+              }}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30"
+            >
+              <XIcon />
+              Clear All
             </button>
           </div>
         )}
@@ -734,30 +1109,40 @@ export function Transactions() {
           <div className="mb-4 w-full md:col-start-1 md:row-start-1 md:mb-0 md:self-start">
             <div className="sticky top-6 w-full md:w-[7.5rem]">
               <TransactionsFilterRail
-                accounts={accounts} categories={categories} selectedAccountIds={selectedAccountIds} selectedCategories={selectedCategories}
-                onToggleAccount={toggleAccount} onToggleCategory={toggleCategory} onClearAccounts={() => setSelectedAccountIds([])} onClearCategories={() => setSelectedCategories([])}
+                accounts={accounts}
+                categories={categories}
+                selectedAccountIds={selectedAccountIds}
+                selectedCategories={selectedCategories}
+                onToggleAccount={toggleAccount}
+                onToggleCategory={toggleCategory}
+                onClearAccounts={() => setSelectedAccountIds([])}
+                onClearCategories={() => setSelectedCategories([])}
               />
             </div>
           </div>
 
           {/* Transactions list */}
           <div className="min-w-0 md:col-start-2 md:row-start-1 md:flex md:min-h-0 md:flex-1 md:flex-col">
-            {error ? <div className="mb-2 text-[12px] text-red-600 dark:text-red-400">{error}</div> : null}
+            {error ? (
+              <div className="mb-2 text-[12px] text-red-600 dark:text-red-400">
+                {error}
+              </div>
+            ) : null}
             <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
               <div className="border-b border-zinc-100 bg-zinc-50/50 px-2 py-1.5 dark:border-zinc-800 dark:bg-zinc-950/40">
                 <ListSectionSearchBar
                   placeholder="Search transactions..."
                   value={txnSearchQuery}
                   onChange={(v) => {
-                    setTxnSearchQuery(v)
-                    setTxnSearchPhase(1)
+                    setTxnSearchQuery(v);
+                    setTxnSearchPhase(1);
                   }}
                   fieldOpen={txnSearchFieldOpen}
                   onFieldOpen={() => setTxnSearchFieldOpen(true)}
                   onFieldClose={() => {
-                    setTxnSearchFieldOpen(false)
-                    setTxnSearchQuery('')
-                    setTxnSearchPhase(1)
+                    setTxnSearchFieldOpen(false);
+                    setTxnSearchQuery("");
+                    setTxnSearchPhase(1);
                   }}
                   phase={txnSearchPhase}
                   onPhaseReset={() => setTxnSearchPhase(1)}
@@ -766,25 +1151,91 @@ export function Transactions() {
                   onInputKeyDown={handleTxnSearchKeyDown}
                 />
               </div>
-              <div className="flex items-center justify-between border-b border-zinc-100 px-2 py-1.5 dark:border-zinc-800">
-                <button type="button" onClick={() => setAdding(true)} className="flex h-6 w-6 items-center justify-center text-zinc-400 transition-colors hover:text-zinc-700 dark:hover:text-zinc-200" aria-label="Add transaction"><PlusIcon /></button>
+              <div className="relative flex items-center justify-between border-b border-zinc-100 px-2 py-1.5 dark:border-zinc-800">
+                <button
+                  type="button"
+                  onClick={() => setAdding(true)}
+                  className="flex h-6 w-6 items-center justify-center text-zinc-400 transition-colors hover:text-zinc-700 dark:hover:text-zinc-200"
+                  aria-label="Add transaction"
+                >
+                  <PlusIcon />
+                </button>
                 <div className="flex items-center gap-1">
                   {hasUndoActions && (
-                    <button type="button" onClick={() => void undoLastAction()} className="flex h-6 w-6 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200" aria-label="Undo (⌘Z)"><UndoIcon /></button>
+                    <button
+                      type="button"
+                      onClick={() => void undoLastAction()}
+                      className="flex h-6 w-6 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                      aria-label="Undo (⌘Z)"
+                    >
+                      <UndoIcon />
+                    </button>
                   )}
                   {editMode ? (
                     <>
                       <button
                         type="button"
                         onClick={() => void deleteAllTransactions()}
-                        className={`rounded-full px-2 py-1 text-[11px] font-medium transition-colors ${deleteAllArmed ? 'bg-red-50 text-red-700 ring-1 ring-inset ring-red-200 dark:bg-red-950/30 dark:text-red-300 dark:ring-red-900' : 'text-zinc-400 hover:text-red-600 dark:hover:text-red-300'}`}
+                        className={`rounded-full px-2 py-1 text-[11px] font-medium transition-colors ${deleteAllArmed ? "bg-red-50 text-red-700 ring-1 ring-inset ring-red-200 dark:bg-red-950/30 dark:text-red-300 dark:ring-red-900" : "text-zinc-400 hover:text-red-600 dark:hover:text-red-300"}`}
                       >
-                        {deleteAllArmed ? 'Confirm Delete All' : 'Delete All'}
+                        {deleteAllArmed ? "Confirm Delete All" : "Delete All"}
                       </button>
-                      <button type="button" onClick={() => { setEditMode(false); setDeleteAllArmed(false) }} className="flex h-6 w-6 items-center justify-center rounded-full text-emerald-600 transition-colors hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-950/30" aria-label="Done editing"><CheckIcon /></button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditMode(false);
+                          setDeleteAllArmed(false);
+                        }}
+                        className="flex h-6 w-6 items-center justify-center rounded-full text-emerald-600 transition-colors hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-950/30"
+                        aria-label="Done editing"
+                      >
+                        <CheckIcon />
+                      </button>
                     </>
                   ) : (
-                    <button type="button" onClick={() => setEditMode(true)} className="flex h-6 w-6 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200" aria-label="Edit transactions"><PencilIcon /></button>
+                    <button
+                      type="button"
+                      onClick={() => setEditMode(true)}
+                      className="flex h-6 w-6 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                      aria-label="Edit transactions"
+                    >
+                      <PencilIcon />
+                    </button>
+                  )}
+                </div>
+                <div
+                  ref={sortRef}
+                  className="absolute right-12 top-1/2 -translate-y-1/2 md:right-[140px]"
+                >
+                  <button
+                    type="button"
+                    onClick={() => setSortOpen((v) => !v)}
+                    className="rounded-full bg-zinc-100 px-2.5 py-1 text-[11px] font-medium text-zinc-700 transition-colors hover:bg-zinc-200/80 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+                    aria-haspopup="menu"
+                    aria-expanded={sortOpen}
+                  >
+                    Sort by: {SORT_OPTIONS.find((o) => o.id === sortKey)?.label ?? "Date"}
+                  </button>
+                  {sortOpen && (
+                    <div
+                      role="menu"
+                      className="absolute right-0 z-30 mt-1 min-w-[11.5rem] rounded-lg border border-zinc-200/80 bg-white p-1 shadow-[0_4px_12px_rgba(0,0,0,0.12)] dark:border-zinc-600 dark:bg-zinc-900"
+                    >
+                      {SORT_OPTIONS.map((opt) => (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          role="menuitem"
+                          onClick={() => {
+                            setSortKey(opt.id);
+                            setSortOpen(false);
+                          }}
+                          className={`flex w-full rounded-md px-2.5 py-1.5 text-left text-[12px] font-medium transition-colors ${sortKey === opt.id ? "bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100" : "text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-950"}`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
                   )}
                 </div>
               </div>
@@ -796,11 +1247,23 @@ export function Transactions() {
                 <div className="text-right">Amount</div>
                 <div aria-hidden="true" />
               </div>
-              {adding ? <AddTransactionRow accounts={accounts} categories={categories} anchor={anchor} onDone={handleAddDone} /> : null}
+              {adding ? (
+                <AddTransactionRow
+                  accounts={accounts}
+                  categories={categories}
+                  anchor={anchor}
+                  onDone={handleAddDone}
+                />
+              ) : null}
               {sortedTransactions.length === 0 && !adding ? (
-                <div className="px-4 py-10 text-center text-sm text-zinc-500 dark:text-zinc-400">No transactions for this period</div>
-              ) : sortedTransactions.length > 0 && txnSearchFiltered.length === 0 ? (
-                <div className="px-4 py-10 text-center text-sm text-zinc-500 dark:text-zinc-400">No transactions match your search.</div>
+                <div className="px-4 py-10 text-center text-sm text-zinc-500 dark:text-zinc-400">
+                  No transactions for this period
+                </div>
+              ) : sortedTransactions.length > 0 &&
+                txnSearchFiltered.length === 0 ? (
+                <div className="px-4 py-10 text-center text-sm text-zinc-500 dark:text-zinc-400">
+                  No transactions match your search.
+                </div>
               ) : (
                 txnSearchFiltered.map((tx) => (
                   <TransactionRow
@@ -809,21 +1272,47 @@ export function Transactions() {
                     accounts={accounts}
                     categories={categories}
                     editMode={editMode}
-                    govExcluded={govAidActive && isEbtTransaction(tx, accountsById)}
+                    govExcluded={
+                      govAidActive && isEbtTransaction(tx, accountsById)
+                    }
                     onChanged={bumpDataVersion}
                     onDelete={() => deleteTransaction(tx.id)}
-                    onContextMenu={(e) => { e.preventDefault(); setContextMenu({ txId: tx.id, x: e.clientX, y: e.clientY }) }}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setContextMenu({
+                        txId: tx.id,
+                        x: e.clientX,
+                        y: e.clientY,
+                      });
+                    }}
                   />
                 ))
               )}
               {incomeFlaggedTx.length > 0 && (
                 <div className="flex items-center justify-between gap-3 border-t border-zinc-100 px-4 py-2.5 dark:border-zinc-800">
                   <span className="text-[12px] font-medium text-zinc-600 dark:text-zinc-300">
-                    Delete all Venmo income? <span className="text-[11px] font-normal text-zinc-400 dark:text-zinc-500">({incomeFlaggedTx.length} flagged)</span>
+                    Delete all Venmo income?{" "}
+                    <span className="text-[11px] font-normal text-zinc-400 dark:text-zinc-500">
+                      ({incomeFlaggedTx.length} flagged)
+                    </span>
                   </span>
                   <div className="flex items-center gap-1">
-                    <button type="button" onClick={() => void ignoreIncomeFlags()} aria-label="Ignore income flags" className="inline-flex h-6 w-6 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"><XIcon /></button>
-                    <button type="button" onClick={() => void deleteIncomeTransactions()} aria-label="Delete income transactions" className="inline-flex h-6 w-6 items-center justify-center rounded-full text-emerald-600 transition-colors hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-950/30"><CheckIcon /></button>
+                    <button
+                      type="button"
+                      onClick={() => void ignoreIncomeFlags()}
+                      aria-label="Ignore income flags"
+                      className="inline-flex h-6 w-6 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                    >
+                      <XIcon />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void deleteIncomeTransactions()}
+                      aria-label="Delete income transactions"
+                      className="inline-flex h-6 w-6 items-center justify-center rounded-full text-emerald-600 transition-colors hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-950/30"
+                    >
+                      <CheckIcon />
+                    </button>
                   </div>
                 </div>
               )}
@@ -837,18 +1326,61 @@ export function Transactions() {
               >
                 {contextMenu.confirming ? (
                   <>
-                    <button type="button" onClick={async () => { await deleteTransaction(contextMenu.txId); setContextMenu(null) }} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30">Delete</button>
-                    <button type="button" onClick={() => setContextMenu(null)} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-zinc-500 hover:bg-zinc-50 dark:text-zinc-400 dark:hover:bg-zinc-800">Cancel</button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        await deleteTransaction(contextMenu.txId);
+                        setContextMenu(null);
+                      }}
+                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30"
+                    >
+                      Delete
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setContextMenu(null)}
+                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-zinc-500 hover:bg-zinc-50 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                    >
+                      Cancel
+                    </button>
                   </>
                 ) : (
                   <>
                     {(contextMenuTransaction?.amount ?? 0) > 0 ? (
-                      <button type="button" onClick={async () => { await moveTransactionToIncome(contextMenu.txId); setContextMenu(null) }} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-emerald-700 hover:bg-emerald-50 dark:text-emerald-300 dark:hover:bg-emerald-950/30">
-                        Move to income
-                      </button>
+                      <>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            await moveTransactionToIncome(contextMenu.txId);
+                            setContextMenu(null);
+                          }}
+                          className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-emerald-700 hover:bg-emerald-50 dark:text-emerald-300 dark:hover:bg-emerald-950/30"
+                        >
+                          Move to income
+                        </button>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            await moveTransactionToIncomeAsTip(
+                              contextMenu.txId,
+                            );
+                            setContextMenu(null);
+                          }}
+                          className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-emerald-700 hover:bg-emerald-50 dark:text-emerald-300 dark:hover:bg-emerald-950/30"
+                        >
+                          Move to income (tip)
+                        </button>
+                      </>
                     ) : null}
-                    <button type="button" onClick={() => setContextMenu({ ...contextMenu, confirming: true })} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30">
-                      <XIcon />Delete
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setContextMenu({ ...contextMenu, confirming: true })
+                      }
+                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] font-medium text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30"
+                    >
+                      <XIcon />
+                      Delete
                     </button>
                   </>
                 )}
@@ -861,114 +1393,232 @@ export function Transactions() {
         <ChatBox pageId="expenses-actual" fullWidth />
       </div>
     </div>
-  )
+  );
 }
 
 // ---------------------------------------------------------------------------
 // Segmented button (matches Budget page)
 // ---------------------------------------------------------------------------
 
-function SegmentedButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
+function SegmentedButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
   return (
-    <button type="button" onClick={onClick} className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${active ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-zinc-100' : 'text-zinc-500 dark:text-zinc-400'}`}>
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${active ? "bg-white text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-zinc-100" : "text-zinc-500 dark:text-zinc-400"}`}
+    >
       {children}
     </button>
-  )
+  );
 }
 
 // ---------------------------------------------------------------------------
 // Calendar dropdown — adapts to week / month / year period
 // ---------------------------------------------------------------------------
 
-const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-const WEEKDAY_LABELS = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su']
+const MONTH_LABELS = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+];
+const WEEKDAY_LABELS = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
 
-function CalendarDropdown({ period, anchor, onSelect }: { period: DisplayPeriod; anchor: Date; onSelect: (d: Date) => void }) {
-  if (period === 'year') return <YearPicker anchor={anchor} onSelect={onSelect} />
-  if (period === 'month') return <MonthPicker anchor={anchor} onSelect={onSelect} />
-  return <WeekPicker anchor={anchor} onSelect={onSelect} />
+function CalendarDropdown({
+  period,
+  anchor,
+  onSelect,
+}: {
+  period: DisplayPeriod;
+  anchor: Date;
+  onSelect: (d: Date) => void;
+}) {
+  if (period === "year")
+    return <YearPicker anchor={anchor} onSelect={onSelect} />;
+  if (period === "month")
+    return <MonthPicker anchor={anchor} onSelect={onSelect} />;
+  return <WeekPicker anchor={anchor} onSelect={onSelect} />;
 }
 
-function YearPicker({ anchor, onSelect }: { anchor: Date; onSelect: (d: Date) => void }) {
-  const current = anchor.getFullYear()
-  const years = [current - 2, current - 1, current, current + 1, current + 2]
+function YearPicker({
+  anchor,
+  onSelect,
+}: {
+  anchor: Date;
+  onSelect: (d: Date) => void;
+}) {
+  const current = anchor.getFullYear();
+  const years = [current - 2, current - 1, current, current + 1, current + 2];
   return (
     <div className="absolute right-0 z-40 mt-1 rounded-lg border border-zinc-200/80 bg-white p-1 shadow-[0_4px_12px_rgba(0,0,0,0.12)] dark:border-zinc-600 dark:bg-zinc-900">
       <div className="flex gap-1">
         {years.map((y) => (
-          <button key={y} type="button" onClick={() => onSelect(new Date(y, 0, 1))} className={`rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors ${y === current ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950' : 'text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-950'}`}>
+          <button
+            key={y}
+            type="button"
+            onClick={() => onSelect(new Date(y, 0, 1))}
+            className={`rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors ${y === current ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950" : "text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-950"}`}
+          >
             {y}
           </button>
         ))}
       </div>
     </div>
-  )
+  );
 }
 
-function MonthPicker({ anchor, onSelect }: { anchor: Date; onSelect: (d: Date) => void }) {
-  const [viewYear, setViewYear] = useState(anchor.getFullYear())
-  const selectedMonth = anchor.getMonth()
-  const selectedYear = anchor.getFullYear()
+function MonthPicker({
+  anchor,
+  onSelect,
+}: {
+  anchor: Date;
+  onSelect: (d: Date) => void;
+}) {
+  const [viewYear, setViewYear] = useState(anchor.getFullYear());
+  const selectedMonth = anchor.getMonth();
+  const selectedYear = anchor.getFullYear();
   return (
     <div className="absolute right-0 z-40 mt-1 w-[200px] rounded-lg border border-zinc-200/80 bg-white p-2 shadow-[0_4px_12px_rgba(0,0,0,0.12)] dark:border-zinc-600 dark:bg-zinc-900">
       <div className="mb-2 flex items-center justify-between">
-        <button type="button" onClick={() => setViewYear((y) => y - 1)} className="px-1.5 py-0.5 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"><span className="inline-block -rotate-90"><SmallChevron /></span></button>
-        <span className="text-[12px] font-semibold text-zinc-800 dark:text-zinc-200">{viewYear}</span>
-        <button type="button" onClick={() => setViewYear((y) => y + 1)} className="px-1.5 py-0.5 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"><span className="inline-block rotate-90"><SmallChevron /></span></button>
+        <button
+          type="button"
+          onClick={() => setViewYear((y) => y - 1)}
+          className="px-1.5 py-0.5 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"
+        >
+          <span className="inline-block -rotate-90">
+            <SmallChevron />
+          </span>
+        </button>
+        <span className="text-[12px] font-semibold text-zinc-800 dark:text-zinc-200">
+          {viewYear}
+        </span>
+        <button
+          type="button"
+          onClick={() => setViewYear((y) => y + 1)}
+          className="px-1.5 py-0.5 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"
+        >
+          <span className="inline-block rotate-90">
+            <SmallChevron />
+          </span>
+        </button>
       </div>
       <div className="grid grid-cols-3 gap-1">
         {MONTH_LABELS.map((label, i) => {
-          const isSelected = viewYear === selectedYear && i === selectedMonth
+          const isSelected = viewYear === selectedYear && i === selectedMonth;
           return (
-            <button key={label} type="button" onClick={() => onSelect(new Date(viewYear, i, 1))} className={`rounded-md px-1 py-1.5 text-[11px] font-medium transition-colors ${isSelected ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950' : 'text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-950'}`}>
+            <button
+              key={label}
+              type="button"
+              onClick={() => onSelect(new Date(viewYear, i, 1))}
+              className={`rounded-md px-1 py-1.5 text-[11px] font-medium transition-colors ${isSelected ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950" : "text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-950"}`}
+            >
               {label}
             </button>
-          )
+          );
         })}
       </div>
     </div>
-  )
+  );
 }
 
-function MonthDayPicker({ anchor, selected, onSelect }: { anchor: Date; selected: Date; onSelect: (d: Date) => void }) {
-  const [viewMonth, setViewMonth] = useState(() => startOfMonth(anchor))
-  const selectedDay = selected.getDate()
-  const selectedMonth = selected.getMonth()
-  const selectedYear = selected.getFullYear()
+function MonthDayPicker({
+  anchor,
+  selected,
+  onSelect,
+}: {
+  anchor: Date;
+  selected: Date;
+  onSelect: (d: Date) => void;
+}) {
+  const [viewMonth, setViewMonth] = useState(() => startOfMonth(anchor));
+  const selectedDay = selected.getDate();
+  const selectedMonth = selected.getMonth();
+  const selectedYear = selected.getFullYear();
 
-  const daysInMonth = getDaysInMonth(viewMonth)
-  const firstDayOfMonth = getDay(viewMonth)
-  const startOffset = (firstDayOfMonth + 6) % 7
+  const daysInMonth = getDaysInMonth(viewMonth);
+  const firstDayOfMonth = getDay(viewMonth);
+  const startOffset = (firstDayOfMonth + 6) % 7;
 
-  const cells: Array<{ date: Date; inMonth: boolean }> = []
+  const cells: Array<{ date: Date; inMonth: boolean }> = [];
   for (let i = 0; i < startOffset; i++) {
-    const d = new Date(viewMonth.getFullYear(), viewMonth.getMonth(), 1 - startOffset + i)
-    cells.push({ date: d, inMonth: false })
+    const d = new Date(
+      viewMonth.getFullYear(),
+      viewMonth.getMonth(),
+      1 - startOffset + i,
+    );
+    cells.push({ date: d, inMonth: false });
   }
   for (let d = 1; d <= daysInMonth; d++) {
-    cells.push({ date: new Date(viewMonth.getFullYear(), viewMonth.getMonth(), d), inMonth: true })
+    cells.push({
+      date: new Date(viewMonth.getFullYear(), viewMonth.getMonth(), d),
+      inMonth: true,
+    });
   }
   while (cells.length % 7 !== 0) {
-    const last = cells[cells.length - 1].date
-    cells.push({ date: new Date(last.getFullYear(), last.getMonth(), last.getDate() + 1), inMonth: false })
+    const last = cells[cells.length - 1].date;
+    cells.push({
+      date: new Date(last.getFullYear(), last.getMonth(), last.getDate() + 1),
+      inMonth: false,
+    });
   }
 
   return (
     <div className="absolute left-0 top-full z-40 mt-1 w-[240px] rounded-lg border border-zinc-200/80 bg-white p-2 shadow-[0_4px_12px_rgba(0,0,0,0.12)] dark:border-zinc-600 dark:bg-zinc-900">
       <div className="mb-2 flex items-center justify-between">
-        <button type="button" onClick={() => setViewMonth((m) => addMonths(m, -1))} className="px-1.5 py-0.5 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"><span className="inline-block -rotate-90"><SmallChevron /></span></button>
-        <span className="text-[12px] font-semibold text-zinc-800 dark:text-zinc-200">{format(viewMonth, 'MMMM yyyy')}</span>
-        <button type="button" onClick={() => setViewMonth((m) => addMonths(m, 1))} className="px-1.5 py-0.5 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"><span className="inline-block rotate-90"><SmallChevron /></span></button>
+        <button
+          type="button"
+          onClick={() => setViewMonth((m) => addMonths(m, -1))}
+          className="px-1.5 py-0.5 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"
+        >
+          <span className="inline-block -rotate-90">
+            <SmallChevron />
+          </span>
+        </button>
+        <span className="text-[12px] font-semibold text-zinc-800 dark:text-zinc-200">
+          {format(viewMonth, "MMMM yyyy")}
+        </span>
+        <button
+          type="button"
+          onClick={() => setViewMonth((m) => addMonths(m, 1))}
+          className="px-1.5 py-0.5 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"
+        >
+          <span className="inline-block rotate-90">
+            <SmallChevron />
+          </span>
+        </button>
       </div>
       <div className="mb-1 grid grid-cols-7 gap-0">
-        {WEEKDAY_LABELS.map((d) => <div key={d} className="py-0.5 text-center text-[9px] font-medium text-zinc-400 dark:text-zinc-500">{d}</div>)}
+        {WEEKDAY_LABELS.map((d) => (
+          <div
+            key={d}
+            className="py-0.5 text-center text-[9px] font-medium text-zinc-400 dark:text-zinc-500"
+          >
+            {d}
+          </div>
+        ))}
       </div>
       <div className="grid grid-cols-7 gap-0.5">
         {cells.map((cell, idx) => {
           const isSelected =
             cell.date.getDate() === selectedDay &&
             cell.date.getMonth() === selectedMonth &&
-            cell.date.getFullYear() === selectedYear
+            cell.date.getFullYear() === selectedYear;
           return (
             <button
               key={`${cell.date.toISOString()}-${idx}`}
@@ -976,85 +1626,159 @@ function MonthDayPicker({ anchor, selected, onSelect }: { anchor: Date; selected
               onClick={() => onSelect(cell.date)}
               className={`rounded-md py-1.5 text-center text-[11px] transition-colors ${
                 isSelected
-                  ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950'
+                  ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950"
                   : cell.inMonth
-                    ? 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-950'
-                    : 'text-zinc-300 hover:bg-zinc-50 dark:text-zinc-600 dark:hover:bg-zinc-950'
+                    ? "text-zinc-700 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-950"
+                    : "text-zinc-300 hover:bg-zinc-50 dark:text-zinc-600 dark:hover:bg-zinc-950"
               }`}
             >
               {cell.date.getDate()}
             </button>
-          )
+          );
         })}
       </div>
     </div>
-  )
+  );
 }
 
-function WeekPicker({ anchor, onSelect }: { anchor: Date; onSelect: (d: Date) => void }) {
-  const [viewMonth, setViewMonth] = useState(() => startOfMonth(anchor))
-  const selectedWeekStart = startOfWeek(anchor, { weekStartsOn: 1 })
+function WeekPicker({
+  anchor,
+  onSelect,
+}: {
+  anchor: Date;
+  onSelect: (d: Date) => void;
+}) {
+  const [viewMonth, setViewMonth] = useState(() => startOfMonth(anchor));
+  const selectedWeekStart = startOfWeek(anchor, { weekStartsOn: 1 });
 
-  const daysInMonth = getDaysInMonth(viewMonth)
-  const firstDayOfMonth = getDay(viewMonth)
-  const startOffset = (firstDayOfMonth + 6) % 7
+  const daysInMonth = getDaysInMonth(viewMonth);
+  const firstDayOfMonth = getDay(viewMonth);
+  const startOffset = (firstDayOfMonth + 6) % 7;
 
-  const cells: Array<{ date: Date; inMonth: boolean }> = []
+  const cells: Array<{ date: Date; inMonth: boolean }> = [];
   for (let i = 0; i < startOffset; i++) {
-    const d = new Date(viewMonth.getFullYear(), viewMonth.getMonth(), 1 - startOffset + i)
-    cells.push({ date: d, inMonth: false })
+    const d = new Date(
+      viewMonth.getFullYear(),
+      viewMonth.getMonth(),
+      1 - startOffset + i,
+    );
+    cells.push({ date: d, inMonth: false });
   }
   for (let d = 1; d <= daysInMonth; d++) {
-    cells.push({ date: new Date(viewMonth.getFullYear(), viewMonth.getMonth(), d), inMonth: true })
+    cells.push({
+      date: new Date(viewMonth.getFullYear(), viewMonth.getMonth(), d),
+      inMonth: true,
+    });
   }
   while (cells.length % 7 !== 0) {
-    const last = cells[cells.length - 1].date
-    cells.push({ date: new Date(last.getFullYear(), last.getMonth(), last.getDate() + 1), inMonth: false })
+    const last = cells[cells.length - 1].date;
+    cells.push({
+      date: new Date(last.getFullYear(), last.getMonth(), last.getDate() + 1),
+      inMonth: false,
+    });
   }
 
-  const weeks: Array<typeof cells> = []
-  for (let i = 0; i < cells.length; i += 7) weeks.push(cells.slice(i, i + 7))
+  const weeks: Array<typeof cells> = [];
+  for (let i = 0; i < cells.length; i += 7) weeks.push(cells.slice(i, i + 7));
 
   return (
     <div className="absolute right-0 z-40 mt-1 w-[240px] rounded-lg border border-zinc-200/80 bg-white p-2 shadow-[0_4px_12px_rgba(0,0,0,0.12)] dark:border-zinc-600 dark:bg-zinc-900">
       <div className="mb-2 flex items-center justify-between">
-        <button type="button" onClick={() => setViewMonth((m) => addMonths(m, -1))} className="px-1.5 py-0.5 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"><span className="inline-block -rotate-90"><SmallChevron /></span></button>
-        <span className="text-[12px] font-semibold text-zinc-800 dark:text-zinc-200">{format(viewMonth, 'MMMM yyyy')}</span>
-        <button type="button" onClick={() => setViewMonth((m) => addMonths(m, 1))} className="px-1.5 py-0.5 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"><span className="inline-block rotate-90"><SmallChevron /></span></button>
+        <button
+          type="button"
+          onClick={() => setViewMonth((m) => addMonths(m, -1))}
+          className="px-1.5 py-0.5 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"
+        >
+          <span className="inline-block -rotate-90">
+            <SmallChevron />
+          </span>
+        </button>
+        <span className="text-[12px] font-semibold text-zinc-800 dark:text-zinc-200">
+          {format(viewMonth, "MMMM yyyy")}
+        </span>
+        <button
+          type="button"
+          onClick={() => setViewMonth((m) => addMonths(m, 1))}
+          className="px-1.5 py-0.5 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"
+        >
+          <span className="inline-block rotate-90">
+            <SmallChevron />
+          </span>
+        </button>
       </div>
       <div className="mb-1 grid grid-cols-7 gap-0">
-        {WEEKDAY_LABELS.map((d) => <div key={d} className="py-0.5 text-center text-[9px] font-medium text-zinc-400 dark:text-zinc-500">{d}</div>)}
+        {WEEKDAY_LABELS.map((d) => (
+          <div
+            key={d}
+            className="py-0.5 text-center text-[9px] font-medium text-zinc-400 dark:text-zinc-500"
+          >
+            {d}
+          </div>
+        ))}
       </div>
       <div className="flex flex-col">
         {weeks.map((week, wi) => {
-          const weekStart = startOfWeek(week[0].date, { weekStartsOn: 1 })
-          const isSelected = weekStart.getTime() === selectedWeekStart.getTime()
+          const weekStart = startOfWeek(week[0].date, { weekStartsOn: 1 });
+          const isSelected =
+            weekStart.getTime() === selectedWeekStart.getTime();
           return (
-            <button key={wi} type="button" onClick={() => onSelect(weekStart)} className={`grid grid-cols-7 gap-0 rounded-md transition-colors ${isSelected ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950' : 'hover:bg-zinc-50 dark:hover:bg-zinc-950'}`}>
+            <button
+              key={wi}
+              type="button"
+              onClick={() => onSelect(weekStart)}
+              className={`grid grid-cols-7 gap-0 rounded-md transition-colors ${isSelected ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950" : "hover:bg-zinc-50 dark:hover:bg-zinc-950"}`}
+            >
               {week.map((cell, ci) => (
-                <div key={ci} className={`py-1 text-center text-[11px] ${isSelected ? '' : cell.inMonth ? 'text-zinc-700 dark:text-zinc-200' : 'text-zinc-300 dark:text-zinc-600'}`}>
+                <div
+                  key={ci}
+                  className={`py-1 text-center text-[11px] ${isSelected ? "" : cell.inMonth ? "text-zinc-700 dark:text-zinc-200" : "text-zinc-300 dark:text-zinc-600"}`}
+                >
                   {cell.date.getDate()}
                 </div>
               ))}
             </button>
-          )
+          );
         })}
       </div>
     </div>
-  )
+  );
 }
 
 function SmallChevron() {
-  return (<svg width="10" height="10" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M5 12.5 L10 7.5 L15 12.5" /></svg>)
+  return (
+    <svg
+      width="10"
+      height="10"
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M5 12.5 L10 7.5 L15 12.5" />
+    </svg>
+  );
 }
 
 function QuestionMarkIcon() {
   return (
-    <svg width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.1"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
       <path d="M7.8 7.1a2.5 2.5 0 0 1 4.4 1.6c0 1.9-2.2 2.2-2.2 3.8" />
       <circle cx="10" cy="14.8" r="0.85" fill="currentColor" stroke="none" />
     </svg>
-  )
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1062,90 +1786,211 @@ function QuestionMarkIcon() {
 // ---------------------------------------------------------------------------
 
 function TransactionsFilterRail({
-  accounts, categories, selectedAccountIds, selectedCategories, onToggleAccount, onToggleCategory, onClearAccounts, onClearCategories
+  accounts,
+  categories,
+  selectedAccountIds,
+  selectedCategories,
+  onToggleAccount,
+  onToggleCategory,
+  onClearAccounts,
+  onClearCategories,
 }: {
-  accounts: Account[]; categories: string[]; selectedAccountIds: number[]; selectedCategories: string[]
-  onToggleAccount: (id: number) => void; onToggleCategory: (category: string) => void; onClearAccounts: () => void; onClearCategories: () => void
+  accounts: Account[];
+  categories: string[];
+  selectedAccountIds: number[];
+  selectedCategories: string[];
+  onToggleAccount: (id: number) => void;
+  onToggleCategory: (category: string) => void;
+  onClearAccounts: () => void;
+  onClearCategories: () => void;
 }) {
   return (
     <div className="flex w-full flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
-      <div className="shrink-0 border-b border-zinc-100 bg-zinc-50/80 px-2.5 py-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950/50 dark:text-zinc-400">Filters</div>
+      <div className="shrink-0 border-b border-zinc-100 bg-zinc-50/80 px-2.5 py-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950/50 dark:text-zinc-400">
+        Filters
+      </div>
       <div className="px-2 py-1.5">
-        <FilterGroup ariaLabel="Accounts" hasSelection={selectedAccountIds.length > 0} onClear={onClearAccounts}>
+        <FilterGroup
+          ariaLabel="Accounts"
+          hasSelection={selectedAccountIds.length > 0}
+          onClear={onClearAccounts}
+        >
           {accounts.map((a) => (
-            <AccountFilterPill key={a.id} label={a.name} color={a.color} active={selectedAccountIds.includes(a.id)} onClick={() => onToggleAccount(a.id)} />
+            <AccountFilterPill
+              key={a.id}
+              label={a.name}
+              color={a.color}
+              active={selectedAccountIds.includes(a.id)}
+              onClick={() => onToggleAccount(a.id)}
+            />
           ))}
         </FilterGroup>
         {categories.length > 0 && (
-          <FilterGroup ariaLabel="Categories" hasSelection={selectedCategories.length > 0} onClear={onClearCategories}>
+          <FilterGroup
+            ariaLabel="Categories"
+            hasSelection={selectedCategories.length > 0}
+            onClear={onClearCategories}
+          >
             {categories.map((cat) => (
-              <FilterPill key={cat} label={cat} active={selectedCategories.includes(cat)} tone={categoryTone(cat)} onClick={() => onToggleCategory(cat)} />
+              <FilterPill
+                key={cat}
+                label={cat}
+                active={selectedCategories.includes(cat)}
+                tone={categoryTone(cat)}
+                onClick={() => onToggleCategory(cat)}
+              />
             ))}
           </FilterGroup>
         )}
       </div>
     </div>
-  )
+  );
 }
 
-function AccountFilterPill({ label, color, active, onClick }: { label: string; color: string; active: boolean; onClick: () => void }) {
+function AccountFilterPill({
+  label,
+  color,
+  active,
+  onClick,
+}: {
+  label: string;
+  color: string;
+  active: boolean;
+  onClick: () => void;
+}) {
   return (
     <button
       type="button"
       aria-pressed={active}
       onClick={onClick}
       className={`w-full rounded-md px-2 py-1 text-left text-[11px] font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-300 ${
-        active ? 'ring-1 ring-inset' : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200'
+        active
+          ? "ring-1 ring-inset"
+          : "text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
       }`}
-      style={active ? { color, backgroundColor: `${color}22`, boxShadow: `inset 0 0 0 1px ${color}66` } : undefined}
+      style={
+        active
+          ? {
+              color,
+              backgroundColor: `${color}22`,
+              boxShadow: `inset 0 0 0 1px ${color}66`,
+            }
+          : undefined
+      }
     >
       {label}
     </button>
-  )
+  );
 }
 
-function FilterGroup({ ariaLabel, hasSelection, onClear, children }: { ariaLabel: string; hasSelection: boolean; onClear: () => void; children: ReactNode }) {
+function FilterGroup({
+  ariaLabel,
+  hasSelection,
+  onClear,
+  children,
+}: {
+  ariaLabel: string;
+  hasSelection: boolean;
+  onClear: () => void;
+  children: ReactNode;
+}) {
   return (
-    <div className="flex flex-col gap-0.5 border-b border-zinc-100 py-1.5 last:border-b-0 dark:border-zinc-800" role="group" aria-label={ariaLabel}>
+    <div
+      className="flex flex-col gap-0.5 border-b border-zinc-100 py-1.5 last:border-b-0 dark:border-zinc-800"
+      role="group"
+      aria-label={ariaLabel}
+    >
       {children}
-      {hasSelection ? <button type="button" onClick={onClear} className="mt-0.5 self-start text-[10px] font-medium text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200">Clear</button> : null}
+      {hasSelection ? (
+        <button
+          type="button"
+          onClick={onClear}
+          className="mt-0.5 self-start text-[10px] font-medium text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200"
+        >
+          Clear
+        </button>
+      ) : null}
     </div>
-  )
+  );
 }
 
-function FilterPill({ label, active, tone, onClick }: { label: string; active: boolean; tone: 'emerald' | 'amber' | 'sky' | 'violet' | 'red' | 'zinc'; onClick: () => void }) {
-  const activeClass = tone === 'emerald' ? 'bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-950/30 dark:text-emerald-300 dark:ring-emerald-900'
-    : tone === 'amber' ? 'bg-amber-50 text-amber-700 ring-amber-200 dark:bg-amber-950/30 dark:text-amber-300 dark:ring-amber-900'
-    : tone === 'sky' ? 'bg-sky-50 text-sky-700 ring-sky-200 dark:bg-sky-950/30 dark:text-sky-300 dark:ring-sky-900'
-    : tone === 'violet' ? 'bg-violet-50 text-violet-700 ring-violet-200 dark:bg-violet-950/30 dark:text-violet-300 dark:ring-violet-900'
-    : tone === 'red' ? 'bg-red-50 text-red-700 ring-red-200 dark:bg-red-950/30 dark:text-red-300 dark:ring-red-900'
-    : 'bg-zinc-900 text-white ring-zinc-900 dark:bg-zinc-100 dark:text-zinc-950 dark:ring-zinc-100'
+function FilterPill({
+  label,
+  active,
+  tone,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  tone: "emerald" | "amber" | "sky" | "violet" | "red" | "zinc";
+  onClick: () => void;
+}) {
+  const activeClass =
+    tone === "emerald"
+      ? "bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-950/30 dark:text-emerald-300 dark:ring-emerald-900"
+      : tone === "amber"
+        ? "bg-amber-50 text-amber-700 ring-amber-200 dark:bg-amber-950/30 dark:text-amber-300 dark:ring-amber-900"
+        : tone === "sky"
+          ? "bg-sky-50 text-sky-700 ring-sky-200 dark:bg-sky-950/30 dark:text-sky-300 dark:ring-sky-900"
+          : tone === "violet"
+            ? "bg-violet-50 text-violet-700 ring-violet-200 dark:bg-violet-950/30 dark:text-violet-300 dark:ring-violet-900"
+            : tone === "red"
+              ? "bg-red-50 text-red-700 ring-red-200 dark:bg-red-950/30 dark:text-red-300 dark:ring-red-900"
+              : "bg-zinc-900 text-white ring-zinc-900 dark:bg-zinc-100 dark:text-zinc-950 dark:ring-zinc-100";
   return (
-    <button type="button" aria-pressed={active} onClick={onClick} className={`w-full rounded-md px-2 py-1 text-left text-[11px] font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-300 ${active ? activeClass : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200'}`}>
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      className={`w-full rounded-md px-2 py-1 text-left text-[11px] font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-300 ${active ? activeClass : "text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"}`}
+    >
       {label}
     </button>
-  )
+  );
 }
 
 // ---------------------------------------------------------------------------
 // Import section helpers
 // ---------------------------------------------------------------------------
 
-function ImportedFileEntry({ file, formatDate, onContextMenu }: { file: ImportedFileRecord; formatDate: (unix: number) => string; onContextMenu: (e: React.MouseEvent) => void }) {
+function ImportedFileEntry({
+  file,
+  formatDate,
+  onContextMenu,
+}: {
+  file: ImportedFileRecord;
+  formatDate: (unix: number) => string;
+  onContextMenu: (e: React.MouseEvent) => void;
+}) {
   return (
-    <div className="relative flex items-start justify-end gap-2" style={{ overflow: 'visible' }} onContextMenu={onContextMenu}>
+    <div
+      className="relative flex items-start justify-end gap-2"
+      style={{ overflow: "visible" }}
+      onContextMenu={onContextMenu}
+    >
       <div className="group/file min-w-0 text-right">
-        <span className="block text-[12px] font-medium text-zinc-700 dark:text-zinc-200">{file.file_name}</span>
-        <span className="block text-[10px] text-zinc-400 dark:text-zinc-500">{formatFileSize(file.file_size)} · {file.imported_count} imported · {formatImportSpan(file, formatDate)}</span>
+        <span className="block text-[12px] font-medium text-zinc-700 dark:text-zinc-200">
+          {file.file_name}
+        </span>
+        <span className="block text-[10px] text-zinc-400 dark:text-zinc-500">
+          {formatFileSize(file.file_size)} · {file.imported_count} imported ·{" "}
+          {formatImportSpan(file, formatDate)}
+        </span>
         <div className="pointer-events-none absolute right-0 top-[calc(100%+8px)] z-[60] hidden w-[420px] overflow-hidden rounded-xl border border-zinc-200 bg-white text-left shadow-xl group-hover/file:block dark:border-zinc-700 dark:bg-zinc-900">
           <div className="flex items-start gap-3 border-b border-zinc-100 p-3 dark:border-zinc-800">
-            <CsvFileIcon label={file.file_type || 'CSV'} />
+            <CsvFileIcon label={file.file_type || "CSV"} />
             <div className="min-w-0 flex-1">
-              <span className="block text-sm font-semibold text-zinc-900 dark:text-zinc-100">{file.file_name}</span>
-              <span className="mt-1 block text-[11px] text-zinc-500 dark:text-zinc-400">
-                {formatFileSize(file.file_size)} · {file.preview.rowCount} rows · {file.preview.columnCount} columns · {file.imported_count} imported · {file.skipped_count} skipped
+              <span className="block text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                {file.file_name}
               </span>
-              <span className="mt-0.5 block text-[11px] text-zinc-400 dark:text-zinc-500">{formatImportSpan(file, formatDate)}</span>
+              <span className="mt-1 block text-[11px] text-zinc-500 dark:text-zinc-400">
+                {formatFileSize(file.file_size)} · {file.preview.rowCount} rows
+                · {file.preview.columnCount} columns · {file.imported_count}{" "}
+                imported · {file.skipped_count} skipped
+              </span>
+              <span className="mt-0.5 block text-[11px] text-zinc-400 dark:text-zinc-500">
+                {formatImportSpan(file, formatDate)}
+              </span>
             </div>
           </div>
           <div className="overflow-x-auto p-3">
@@ -1153,7 +1998,12 @@ function ImportedFileEntry({ file, formatDate, onContextMenu }: { file: Imported
               <thead>
                 <tr>
                   {file.preview.headers.slice(0, 6).map((header) => (
-                    <th key={header} className="truncate border border-zinc-200 bg-zinc-50 px-1.5 py-1 text-left font-medium text-zinc-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-400">{header}</th>
+                    <th
+                      key={header}
+                      className="truncate border border-zinc-200 bg-zinc-50 px-1.5 py-1 text-left font-medium text-zinc-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-400"
+                    >
+                      {header}
+                    </th>
                   ))}
                 </tr>
               </thead>
@@ -1161,7 +2011,12 @@ function ImportedFileEntry({ file, formatDate, onContextMenu }: { file: Imported
                 {file.preview.rows.slice(0, 5).map((row, rowIndex) => (
                   <tr key={`${file.id}-${rowIndex}`}>
                     {row.slice(0, 6).map((cell, cellIndex) => (
-                      <td key={`${file.id}-${rowIndex}-${cellIndex}`} className="truncate border border-zinc-200 px-1.5 py-1 text-zinc-600 dark:border-zinc-700 dark:text-zinc-300">{cell || ' '}</td>
+                      <td
+                        key={`${file.id}-${rowIndex}-${cellIndex}`}
+                        className="truncate border border-zinc-200 px-1.5 py-1 text-zinc-600 dark:border-zinc-700 dark:text-zinc-300"
+                      >
+                        {cell || " "}
+                      </td>
                     ))}
                   </tr>
                 ))}
@@ -1171,153 +2026,268 @@ function ImportedFileEntry({ file, formatDate, onContextMenu }: { file: Imported
         </div>
       </div>
     </div>
-  )
+  );
 }
 
-function categoryTone(category: string): 'emerald' | 'amber' | 'sky' | 'violet' | 'red' | 'zinc' {
-  const n = category.toLowerCase()
-  if (n.includes('groceries') || n.includes('income')) return 'emerald'
-  if (n.includes('bar') || n.includes('entertainment') || n.includes('travel')) return 'amber'
-  if (n.includes('transportation') || n.includes('gas') || n.includes('car')) return 'sky'
-  if (n.includes('business') || n.includes('ai') || n.includes('subscription')) return 'violet'
-  if (n.includes('rent') || n.includes('health') || n.includes('insurance')) return 'red'
-  return 'zinc'
+function categoryTone(
+  category: string,
+): "emerald" | "amber" | "sky" | "violet" | "red" | "zinc" {
+  const n = category.toLowerCase();
+  if (n.includes("groceries") || n.includes("income")) return "emerald";
+  if (n.includes("bar") || n.includes("entertainment") || n.includes("travel"))
+    return "amber";
+  if (n.includes("transportation") || n.includes("gas") || n.includes("car"))
+    return "sky";
+  if (n.includes("business") || n.includes("ai") || n.includes("subscription"))
+    return "violet";
+  if (n.includes("rent") || n.includes("health") || n.includes("insurance"))
+    return "red";
+  return "zinc";
+}
+
+function categoryColorHex(category: string): string {
+  const tone = categoryTone(category);
+  if (tone === "emerald") return "#059669";
+  if (tone === "amber") return "#d97706";
+  if (tone === "sky") return "#0284c7";
+  if (tone === "violet") return "#7c3aed";
+  if (tone === "red") return "#dc2626";
+  return "#18181b";
+}
+
+function transactionFilteredTotalPresentation(
+  selectedAccountIds: number[],
+  selectedCategories: string[],
+  accountsById: Map<number, Account>,
+): { style: CSSProperties } {
+  const colors = [
+    ...selectedAccountIds.map((id) => accountsById.get(id)?.color ?? ""),
+    ...selectedCategories.map((category) => categoryColorHex(category)),
+  ].filter(Boolean);
+  if (colors.length === 0) return { style: { color: "#dc2626" } };
+  if (colors.length === 1) return { style: { color: colors[0] } };
+  const mixed = colors.reduce(
+    (sum, color) => {
+      const rgb = hexToRgb(color);
+      if (!rgb) return sum;
+      return {
+        red: sum.red + rgb.red,
+        green: sum.green + rgb.green,
+        blue: sum.blue + rgb.blue,
+        count: sum.count + 1,
+      };
+    },
+    { red: 0, green: 0, blue: 0, count: 0 },
+  );
+  if (mixed.count === 0) return { style: { color: "#dc2626" } };
+  return {
+    style: {
+      color: rgbToHex(
+        Math.round(mixed.red / mixed.count),
+        Math.round(mixed.green / mixed.count),
+        Math.round(mixed.blue / mixed.count),
+      ),
+    },
+  };
+}
+
+function hexToRgb(
+  hex: string,
+): { red: number; green: number; blue: number } | null {
+  const normalized = hex.trim().replace(/^#/, "");
+  if (!/^[0-9a-fA-F]{6}$/.test(normalized)) return null;
+  return {
+    red: Number.parseInt(normalized.slice(0, 2), 16),
+    green: Number.parseInt(normalized.slice(2, 4), 16),
+    blue: Number.parseInt(normalized.slice(4, 6), 16),
+  };
+}
+
+function rgbToHex(red: number, green: number, blue: number): string {
+  return `#${[red, green, blue].map((value) => value.toString(16).padStart(2, "0")).join("")}`;
 }
 
 function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function formatImportSpan(file: ImportedFileRecord, formatDate: (unix: number) => string): string {
+function formatImportSpan(
+  file: ImportedFileRecord,
+  formatDate: (unix: number) => string,
+): string {
   if (file.first_transaction_date && file.last_transaction_date) {
-    if (file.first_transaction_date === file.last_transaction_date) return `Transactions on ${formatDate(file.first_transaction_date)}`
-    return `${formatDate(file.first_transaction_date)} - ${formatDate(file.last_transaction_date)}`
+    if (file.first_transaction_date === file.last_transaction_date)
+      return `Transactions on ${formatDate(file.first_transaction_date)}`;
+    return `${formatDate(file.first_transaction_date)} - ${formatDate(file.last_transaction_date)}`;
   }
-  return `Imported ${formatDate(file.created_at)}`
+  return `Imported ${formatDate(file.created_at)}`;
 }
 
 // ---------------------------------------------------------------------------
 // Transaction rows
 // ---------------------------------------------------------------------------
 
-type TxEditField = 'date' | 'description' | 'category' | 'account' | 'amount' | null
+type TxEditField =
+  | "date"
+  | "description"
+  | "category"
+  | "account"
+  | "amount"
+  | null;
 
-function TransactionRow({ transaction, accounts, categories, editMode, govExcluded, onChanged, onDelete, onContextMenu }: {
-  transaction: Transaction; accounts: Account[]; categories: string[]; editMode: boolean; govExcluded: boolean;
-  onChanged: () => void; onDelete: () => Promise<void>; onContextMenu: (e: React.MouseEvent) => void
+function TransactionRow({
+  transaction,
+  accounts,
+  categories,
+  editMode,
+  govExcluded,
+  onChanged,
+  onDelete,
+  onContextMenu,
+}: {
+  transaction: Transaction;
+  accounts: Account[];
+  categories: string[];
+  editMode: boolean;
+  govExcluded: boolean;
+  onChanged: () => void;
+  onDelete: () => Promise<void>;
+  onContextMenu: (e: React.MouseEvent) => void;
 }) {
-  const [activeField, setActiveField] = useState<TxEditField>(null)
-  const [dateDraft, setDateDraft] = useState(formatTransactionDateInput(transaction.date))
-  const [descDraft, setDescDraft] = useState(transaction.description)
-  const [catDraft, setCatDraft] = useState(() => transaction.mapped_category?.trim() || 'Uncategorized')
-  const [amountDraft, setAmountDraft] = useState(formatCurrency(transaction.amount))
-  const [accountDraft, setAccountDraft] = useState(transaction.account_id)
-  const rowRef = useRef<HTMLDivElement>(null)
-  const savingRef = useRef(false)
-  const commitRef = useRef<() => void>(() => {})
-  const { formatDate } = useDateFormat()
+  const [activeField, setActiveField] = useState<TxEditField>(null);
+  const [dateDraft, setDateDraft] = useState(
+    formatTransactionDateInput(transaction.date),
+  );
+  const [descDraft, setDescDraft] = useState(transaction.description);
+  const [catDraft, setCatDraft] = useState(
+    () => transaction.mapped_category?.trim() || "Uncategorized",
+  );
+  const [amountDraft, setAmountDraft] = useState(
+    formatCurrency(transaction.amount),
+  );
+  const [accountDraft, setAccountDraft] = useState(transaction.account_id);
+  const rowRef = useRef<HTMLDivElement>(null);
+  const savingRef = useRef(false);
+  const commitRef = useRef<() => void>(() => {});
+  const { formatDate } = useDateFormat();
 
   const accountName = useMemo(() => {
-    if (!transaction.account_id) return ''
-    return accounts.find((a) => a.id === transaction.account_id)?.name ?? ''
-  }, [accounts, transaction.account_id])
+    if (!transaction.account_id) return "";
+    return accounts.find((a) => a.id === transaction.account_id)?.name ?? "";
+  }, [accounts, transaction.account_id]);
 
   useEffect(() => {
-    if (activeField) return
-    setDateDraft(formatTransactionDateInput(transaction.date))
-    setDescDraft(transaction.description)
-    setCatDraft(transaction.mapped_category?.trim() || 'Uncategorized')
-    setAmountDraft(formatCurrency(transaction.amount))
-    setAccountDraft(transaction.account_id)
-  }, [activeField, transaction])
+    if (activeField) return;
+    setDateDraft(formatTransactionDateInput(transaction.date));
+    setDescDraft(transaction.description);
+    setCatDraft(transaction.mapped_category?.trim() || "Uncategorized");
+    setAmountDraft(formatCurrency(transaction.amount));
+    setAccountDraft(transaction.account_id);
+  }, [activeField, transaction]);
 
   const saveField = useCallback(async (): Promise<void> => {
-    if (savingRef.current) return
-    savingRef.current = true
+    if (savingRef.current) return;
+    savingRef.current = true;
     try {
-      const parsed = parseCurrencyInput(amountDraft)
+      const parsed = parseCurrencyInput(amountDraft);
       await window.api.updateTransaction(transaction.id, {
         date: parseTransactionDateInput(dateDraft, transaction.date),
         description: descDraft.trim(),
         mapped_category: catDraft,
         amount: parsed ?? transaction.amount,
-        account_id: accountDraft
-      })
-      onChanged()
-    } finally { savingRef.current = false }
-  }, [dateDraft, descDraft, catDraft, amountDraft, accountDraft, transaction, onChanged])
+        account_id: accountDraft,
+      });
+      onChanged();
+    } finally {
+      savingRef.current = false;
+    }
+  }, [
+    dateDraft,
+    descDraft,
+    catDraft,
+    amountDraft,
+    accountDraft,
+    transaction,
+    onChanged,
+  ]);
 
   const pickCategoryAndFinish = useCallback(
     async (category: string): Promise<void> => {
-      if (savingRef.current) return
-      savingRef.current = true
+      if (savingRef.current) return;
+      savingRef.current = true;
       try {
-        const parsed = parseCurrencyInput(amountDraft)
+        const parsed = parseCurrencyInput(amountDraft);
         await window.api.updateTransaction(transaction.id, {
           date: parseTransactionDateInput(dateDraft, transaction.date),
           description: descDraft.trim(),
           mapped_category: category,
           amount: parsed ?? transaction.amount,
-          account_id: accountDraft
-        })
-        setCatDraft(category)
-        onChanged()
-        setActiveField(null)
+          account_id: accountDraft,
+        });
+        setCatDraft(category);
+        onChanged();
+        setActiveField(null);
       } finally {
-        savingRef.current = false
+        savingRef.current = false;
       }
     },
-    [accountDraft, amountDraft, dateDraft, descDraft, onChanged, transaction]
-  )
+    [accountDraft, amountDraft, dateDraft, descDraft, onChanged, transaction],
+  );
 
   const pickAccountAndFinish = useCallback(
     async (accountId: number | null): Promise<void> => {
-      if (savingRef.current) return
-      savingRef.current = true
+      if (savingRef.current) return;
+      savingRef.current = true;
       try {
-        const parsed = parseCurrencyInput(amountDraft)
+        const parsed = parseCurrencyInput(amountDraft);
         await window.api.updateTransaction(transaction.id, {
           date: parseTransactionDateInput(dateDraft, transaction.date),
           description: descDraft.trim(),
           mapped_category: catDraft,
           amount: parsed ?? transaction.amount,
-          account_id: accountId
-        })
-        setAccountDraft(accountId)
-        onChanged()
-        setActiveField(null)
+          account_id: accountId,
+        });
+        setAccountDraft(accountId);
+        onChanged();
+        setActiveField(null);
       } finally {
-        savingRef.current = false
+        savingRef.current = false;
       }
     },
-    [amountDraft, catDraft, dateDraft, descDraft, onChanged, transaction]
-  )
+    [amountDraft, catDraft, dateDraft, descDraft, onChanged, transaction],
+  );
 
-  const commitAndDeactivate = useCallback((): void => { void saveField(); setActiveField(null) }, [saveField])
-  commitRef.current = commitAndDeactivate
+  const commitAndDeactivate = useCallback((): void => {
+    void saveField();
+    setActiveField(null);
+  }, [saveField]);
+  commitRef.current = commitAndDeactivate;
 
   useEffect(() => {
-    if (!activeField) return
+    if (!activeField) return;
     const handler = (e: PointerEvent): void => {
-      if (rowRef.current?.contains(e.target as Node | null)) return
-      commitRef.current()
-    }
-    document.addEventListener('pointerdown', handler, true)
-    return () => document.removeEventListener('pointerdown', handler, true)
-  }, [activeField])
+      if (rowRef.current?.contains(e.target as Node | null)) return;
+      commitRef.current();
+    };
+    document.addEventListener("pointerdown", handler, true);
+    return () => document.removeEventListener("pointerdown", handler, true);
+  }, [activeField]);
 
   function handleKeyDown(e: React.KeyboardEvent): void {
-    if (e.key === 'Enter') { e.preventDefault(); commitAndDeactivate() }
-    if (e.key === 'Escape') {
-      e.preventDefault()
-      setDateDraft(formatTransactionDateInput(transaction.date))
-      setDescDraft(transaction.description)
-      setCatDraft(transaction.mapped_category?.trim() || 'Uncategorized')
-      setAmountDraft(formatCurrency(transaction.amount))
-      setAccountDraft(transaction.account_id)
-      setActiveField(null)
+    if (e.key === "Enter") {
+      e.preventDefault();
+      commitAndDeactivate();
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      setDateDraft(formatTransactionDateInput(transaction.date));
+      setDescDraft(transaction.description);
+      setCatDraft(transaction.mapped_category?.trim() || "Uncategorized");
+      setAmountDraft(formatCurrency(transaction.amount));
+      setAccountDraft(transaction.account_id);
+      setActiveField(null);
     }
   }
 
@@ -1325,29 +2295,59 @@ function TransactionRow({ transaction, accounts, categories, editMode, govExclud
     <div
       ref={rowRef}
       className={`group/row grid grid-cols-[90px_1fr_130px_80px_100px_48px] items-center gap-2 border-b border-zinc-100 px-4 py-2.5 text-sm last:border-b-0 dark:border-zinc-800 ${
-        govExcluded ? 'rounded-md opacity-50 ring-1 ring-inset ring-amber-700/50 dark:ring-amber-500/50' : ''
+        govExcluded
+          ? "rounded-md opacity-50 ring-1 ring-inset ring-amber-700/50 dark:ring-amber-500/50"
+          : ""
       }`}
       onContextMenu={onContextMenu}
     >
       {/* Date */}
-      {activeField === 'date' ? (
-        <input autoFocus value={dateDraft} onChange={(e) => setDateDraft(e.target.value)} onKeyDown={handleKeyDown} className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-sm tabular-nums text-zinc-900 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:ring-zinc-800" />
+      {activeField === "date" ? (
+        <input
+          autoFocus
+          value={dateDraft}
+          onChange={(e) => setDateDraft(e.target.value)}
+          onKeyDown={handleKeyDown}
+          className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-sm tabular-nums text-zinc-900 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:ring-zinc-800"
+        />
       ) : (
-        <button type="button" onClick={() => setActiveField('date')} className="flex h-7 min-w-0 items-center text-left text-zinc-500 dark:text-zinc-400">{formatDate(transaction.date)}</button>
+        <button
+          type="button"
+          onClick={() => setActiveField("date")}
+          className="flex h-7 min-w-0 items-center text-left text-zinc-500 dark:text-zinc-400"
+        >
+          {formatDate(transaction.date)}
+        </button>
       )}
 
       {/* Description */}
-      {activeField === 'description' ? (
-        <input autoFocus value={descDraft} onChange={(e) => setDescDraft(e.target.value)} onKeyDown={handleKeyDown} className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-sm text-zinc-900 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:ring-zinc-800" />
+      {activeField === "description" ? (
+        <input
+          autoFocus
+          value={descDraft}
+          onChange={(e) => setDescDraft(e.target.value)}
+          onKeyDown={handleKeyDown}
+          className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-sm text-zinc-900 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:ring-zinc-800"
+        />
       ) : (
-        <button type="button" onClick={() => setActiveField('description')} className="flex h-7 min-w-0 items-center gap-1.5 truncate text-left text-zinc-900 dark:text-zinc-100">
-          <span className="truncate">{transaction.description || 'Untitled'}</span>
-          {transaction.income_candidate && <span className="shrink-0 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-700 ring-1 ring-inset ring-emerald-200 dark:bg-emerald-950/30 dark:text-emerald-300 dark:ring-emerald-900">Income?</span>}
+        <button
+          type="button"
+          onClick={() => setActiveField("description")}
+          className="flex h-7 min-w-0 items-center gap-1.5 truncate text-left text-zinc-900 dark:text-zinc-100"
+        >
+          <span className="truncate">
+            {transaction.description || "Untitled"}
+          </span>
+          {transaction.income_candidate && (
+            <span className="shrink-0 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-700 ring-1 ring-inset ring-emerald-200 dark:bg-emerald-950/30 dark:text-emerald-300 dark:ring-emerald-900">
+              Income?
+            </span>
+          )}
         </button>
       )}
 
       {/* Category */}
-      {activeField === 'category' ? (
+      {activeField === "category" ? (
         <InlineEditCategoryInput
           value={catDraft}
           categories={categories}
@@ -1356,11 +2356,17 @@ function TransactionRow({ transaction, accounts, categories, editMode, govExclud
           onKeyDown={handleKeyDown}
         />
       ) : (
-        <button type="button" onClick={() => setActiveField('category')} className="flex h-7 min-w-0 items-center truncate text-left text-zinc-500 dark:text-zinc-400">{transaction.mapped_category || 'Uncategorized'}</button>
+        <button
+          type="button"
+          onClick={() => setActiveField("category")}
+          className="flex h-7 min-w-0 items-center truncate text-left text-zinc-500 dark:text-zinc-400"
+        >
+          {transaction.mapped_category || "Uncategorized"}
+        </button>
       )}
 
       {/* Account */}
-      {activeField === 'account' ? (
+      {activeField === "account" ? (
         <InlineEditAccountDropdown
           value={accountDraft}
           accounts={accounts}
@@ -1371,65 +2377,107 @@ function TransactionRow({ transaction, accounts, categories, editMode, govExclud
       ) : (
         <button
           type="button"
-          onClick={() => setActiveField('account')}
+          onClick={() => setActiveField("account")}
           className="flex h-7 min-w-0 items-center truncate rounded px-1 text-left text-[11px]"
-          style={transaction.account_id ? { color: accounts.find((a) => a.id === transaction.account_id)?.color } : undefined}
+          style={
+            transaction.account_id
+              ? {
+                  color: accounts.find((a) => a.id === transaction.account_id)
+                    ?.color,
+                }
+              : undefined
+          }
         >
-          {accountName || '—'}
+          {accountName || "—"}
         </button>
       )}
 
       {/* Amount */}
-      {activeField === 'amount' ? (
-        <input autoFocus value={amountDraft} onChange={(e) => setAmountDraft(e.target.value)} onKeyDown={handleKeyDown} className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-right text-sm tabular-nums text-zinc-900 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:ring-zinc-800" />
+      {activeField === "amount" ? (
+        <input
+          autoFocus
+          value={amountDraft}
+          onChange={(e) => setAmountDraft(e.target.value)}
+          onKeyDown={handleKeyDown}
+          className="h-7 min-w-0 rounded border border-zinc-200 bg-white px-1.5 text-right text-sm tabular-nums text-zinc-900 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:ring-zinc-800"
+        />
       ) : (
-        <button type="button" onClick={() => setActiveField('amount')} className={`flex h-7 min-w-0 items-center justify-end font-medium tabular-nums ${transaction.amount < 0 ? 'text-red-600' : 'text-emerald-600'}`}>{formatCurrency(transaction.amount)}</button>
+        <button
+          type="button"
+          onClick={() => setActiveField("amount")}
+          className={`flex h-7 min-w-0 items-center justify-end font-medium tabular-nums ${transaction.amount < 0 ? "text-red-600" : "text-emerald-600"}`}
+        >
+          {formatCurrency(transaction.amount)}
+        </button>
       )}
 
       {/* Edit-mode delete icon */}
       {editMode ? (
-        <button type="button" onClick={() => void onDelete()} aria-label={`Delete ${transaction.description || 'transaction'}`} className="inline-flex h-6 w-6 items-center justify-center rounded-full text-zinc-300 transition-colors hover:bg-red-50 hover:text-red-600 dark:text-zinc-600 dark:hover:bg-red-950/30 dark:hover:text-red-300">
+        <button
+          type="button"
+          onClick={() => void onDelete()}
+          aria-label={`Delete ${transaction.description || "transaction"}`}
+          className="inline-flex h-6 w-6 items-center justify-center rounded-full text-zinc-300 transition-colors hover:bg-red-50 hover:text-red-600 dark:text-zinc-600 dark:hover:bg-red-950/30 dark:hover:text-red-300"
+        >
           <XIcon />
         </button>
       ) : (
         <span />
       )}
     </div>
-  )
+  );
 }
 
 function formatTransactionDateInput(unix: number): string {
-  return format(new Date(unix * 1000), 'M/d/yyyy')
+  return format(new Date(unix * 1000), "M/d/yyyy");
 }
 
 function parseTransactionDateInput(value: string, fallback: number): number {
-  const localDate = parseLocalDateToUnix(value)
-  if (localDate !== null) return localDate
-  const parsed = Date.parse(value)
-  return Number.isNaN(parsed) ? fallback : Math.floor(parsed / 1000)
+  const localDate = parseLocalDateToUnix(value);
+  if (localDate !== null) return localDate;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? fallback : Math.floor(parsed / 1000);
 }
 
 // ---------------------------------------------------------------------------
 // Inline account dropdown (replaces native select)
 // ---------------------------------------------------------------------------
 
-function InlineEditAccountDropdown({ value, accounts, onChange, onCommittedPick, onAccountsChanged }: {
-  value: number | null; accounts: Account[]; onChange: (id: number | null) => void; onCommittedPick?: (id: number | null) => void; onAccountsChanged?: () => void
+function InlineEditAccountDropdown({
+  value,
+  accounts,
+  onChange,
+  onCommittedPick,
+  onAccountsChanged,
+}: {
+  value: number | null;
+  accounts: Account[];
+  onChange: (id: number | null) => void;
+  onCommittedPick?: (id: number | null) => void;
+  onAccountsChanged?: () => void;
 }) {
-  const [open, setOpen] = useState(true)
-  const [editingId, setEditingId] = useState<number | null>(null)
-  const [nameDraft, setNameDraft] = useState('')
-  const ref = useRef<HTMLDivElement>(null)
-  const selected = accounts.find((a) => a.id === value)
+  const [open, setOpen] = useState(true);
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [nameDraft, setNameDraft] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+  const selected = accounts.find((a) => a.id === value);
 
   useEffect(() => {
-    if (!open) return
-    const close = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false) }
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
-    document.addEventListener('pointerdown', close)
-    document.addEventListener('keydown', onKey)
-    return () => { document.removeEventListener('pointerdown', close); document.removeEventListener('keydown', onKey) }
-  }, [open])
+    if (!open) return;
+    const close = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node))
+        setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", close);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", close);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
 
   return (
     <div ref={ref} className="relative min-w-0">
@@ -1437,59 +2485,113 @@ function InlineEditAccountDropdown({ value, accounts, onChange, onCommittedPick,
         type="button"
         onClick={() => setOpen((v) => !v)}
         className="w-full min-w-0 truncate rounded px-1.5 py-0.5 text-left text-[11px] ring-1 dark:ring-zinc-700"
-        style={selected ? { color: selected.color, backgroundColor: `${selected.color}1f`, boxShadow: `inset 0 0 0 1px ${selected.color}55` } : undefined}
+        style={
+          selected
+            ? {
+                color: selected.color,
+                backgroundColor: `${selected.color}1f`,
+                boxShadow: `inset 0 0 0 1px ${selected.color}55`,
+              }
+            : undefined
+        }
       >
-        {selected?.name || '—'}
+        {selected?.name || "—"}
       </button>
       {open && (
         <div className="absolute left-0 top-full z-40 mt-1 min-w-[120px] overflow-hidden rounded-lg border border-zinc-200 bg-white p-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
-          <button type="button" onMouseDown={(e) => { e.preventDefault(); onChange(null); onCommittedPick?.(null); setOpen(false) }} className="flex w-full rounded-md px-2.5 py-1.5 text-left text-[11px] font-medium text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-950">—</button>
           <button
             type="button"
             onMouseDown={(e) => {
-              e.preventDefault()
+              e.preventDefault();
+              onChange(null);
+              onCommittedPick?.(null);
+              setOpen(false);
+            }}
+            className="flex w-full rounded-md px-2.5 py-1.5 text-left text-[11px] font-medium text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-950"
+          >
+            —
+          </button>
+          <button
+            type="button"
+            onMouseDown={(e) => {
+              e.preventDefault();
               void (async () => {
-                const created = await window.api.createAccount({ name: 'New Account', type: 'chase', color: randomAccountColorHex() })
-                onChange(created.id)
-                onCommittedPick?.(created.id)
-                onAccountsChanged?.()
-                setOpen(true)
-              })()
+                const created = await window.api.createAccount({
+                  name: "New Account",
+                  type: "chase",
+                  color: randomAccountColorHex(),
+                });
+                onChange(created.id);
+                onCommittedPick?.(created.id);
+                onAccountsChanged?.();
+                setOpen(true);
+              })();
             }}
             className="mb-1 flex w-full rounded-md px-2.5 py-1.5 text-left text-[11px] font-semibold text-zinc-700 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-800"
           >
             + Add Account
           </button>
           {accounts.map((a) => (
-            <div key={a.id} className={`rounded-md ${a.id === value ? 'bg-zinc-100 dark:bg-zinc-800' : ''}`}>
+            <div
+              key={a.id}
+              className={`rounded-md ${a.id === value ? "bg-zinc-100 dark:bg-zinc-800" : ""}`}
+            >
               <div className="flex items-center gap-1 px-1.5 py-1">
                 <button
                   type="button"
-                  onMouseDown={(e) => { e.preventDefault(); onChange(a.id); onCommittedPick?.(a.id); setOpen(false) }}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    onChange(a.id);
+                    onCommittedPick?.(a.id);
+                    setOpen(false);
+                  }}
                   className="flex min-w-0 flex-1 items-center gap-1.5 rounded px-1 py-0.5 text-left text-[11px] font-medium hover:bg-zinc-50 dark:hover:bg-zinc-950"
                   style={{ color: a.color }}
                 >
-                  <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: a.color }} />
+                  <span
+                    className="h-2 w-2 shrink-0 rounded-full"
+                    style={{ backgroundColor: a.color }}
+                  />
                   <span className="truncate">{a.name}</span>
                 </button>
-                <button type="button" onMouseDown={(e) => { e.preventDefault(); setEditingId(a.id); setNameDraft(a.name) }} className="rounded px-1 text-[10px] text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200">Edit</button>
+                <button
+                  type="button"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    setEditingId(a.id);
+                    setNameDraft(a.name);
+                  }}
+                  className="rounded px-1 text-[10px] text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                >
+                  Edit
+                </button>
                 <input
                   type="color"
                   value={a.color}
                   onMouseDown={(e) => e.stopPropagation()}
-                  onChange={(e) => { void (async () => { await window.api.updateAccount(a.id, { color: e.target.value }); onAccountsChanged?.() })() }}
+                  onChange={(e) => {
+                    void (async () => {
+                      await window.api.updateAccount(a.id, {
+                        color: e.target.value,
+                      });
+                      onAccountsChanged?.();
+                    })();
+                  }}
                   className="h-4 w-4 cursor-pointer bg-transparent p-0"
                 />
                 <button
                   type="button"
                   onMouseDown={(e) => {
-                    e.preventDefault()
+                    e.preventDefault();
                     void (async () => {
-                      if (accounts.length <= 1) return
-                      await window.api.deleteAccount(a.id)
-                      if (value === a.id) { onChange(null); onCommittedPick?.(null) }
-                      onAccountsChanged?.()
-                    })()
+                      if (accounts.length <= 1) return;
+                      await window.api.deleteAccount(a.id);
+                      if (value === a.id) {
+                        onChange(null);
+                        onCommittedPick?.(null);
+                      }
+                      onAccountsChanged?.();
+                    })();
                   }}
                   className="rounded px-1 text-[10px] text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30"
                 >
@@ -1504,19 +2606,20 @@ function InlineEditAccountDropdown({ value, accounts, onChange, onCommittedPick,
                     onChange={(e) => setNameDraft(e.target.value)}
                     onBlur={() => {
                       void (async () => {
-                        const name = nameDraft.trim()
-                        if (name.length > 0) await window.api.updateAccount(a.id, { name })
-                        setEditingId(null)
-                        onAccountsChanged?.()
-                      })()
+                        const name = nameDraft.trim();
+                        if (name.length > 0)
+                          await window.api.updateAccount(a.id, { name });
+                        setEditingId(null);
+                        onAccountsChanged?.();
+                      })();
                     }}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault()
-                        ;(e.currentTarget as HTMLInputElement).blur()
-                      } else if (e.key === 'Escape') {
-                        e.preventDefault()
-                        setEditingId(null)
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        (e.currentTarget as HTMLInputElement).blur();
+                      } else if (e.key === "Escape") {
+                        e.preventDefault();
+                        setEditingId(null);
                       }
                     }}
                     className="h-6 w-full rounded border border-zinc-200 bg-white px-1.5 text-[11px] outline-none focus:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-950"
@@ -1528,7 +2631,7 @@ function InlineEditAccountDropdown({ value, accounts, onChange, onCommittedPick,
         </div>
       )}
     </div>
-  )
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1540,94 +2643,99 @@ function InlineEditCategoryInput({
   categories,
   onChange,
   onCommittedPick,
-  onKeyDown
+  onKeyDown,
 }: {
-  value: string
-  categories: string[]
-  onChange: (v: string) => void
-  onCommittedPick?: (category: string) => void
-  onKeyDown: (e: React.KeyboardEvent) => void
+  value: string;
+  categories: string[];
+  onChange: (v: string) => void;
+  onCommittedPick?: (category: string) => void;
+  onKeyDown: (e: React.KeyboardEvent) => void;
 }) {
-  const [open, setOpen] = useState(true)
-  const [filterQuery, setFilterQuery] = useState('')
-  const [highlightIdx, setHighlightIdx] = useState(0)
-  const dropdownRef = useRef<HTMLDivElement>(null)
-  const inputRef = useRef<HTMLInputElement>(null)
+  const [open, setOpen] = useState(true);
+  const [filterQuery, setFilterQuery] = useState("");
+  const [highlightIdx, setHighlightIdx] = useState(0);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   const filtered = useMemo(() => {
-    const q = filterQuery.trim().toLowerCase()
-    if (!q) return categories
-    return categories.filter((c) => c.toLowerCase().includes(q))
-  }, [categories, filterQuery])
+    const q = filterQuery.trim().toLowerCase();
+    if (!q) return categories;
+    return categories.filter((c) => c.toLowerCase().includes(q));
+  }, [categories, filterQuery]);
 
   useEffect(() => {
     if (!filterQuery.trim() && value) {
-      const idx = filtered.findIndex((c) => c === value)
-      setHighlightIdx(idx >= 0 ? idx : 0)
+      const idx = filtered.findIndex((c) => c === value);
+      setHighlightIdx(idx >= 0 ? idx : 0);
     } else {
-      setHighlightIdx(0)
+      setHighlightIdx(0);
     }
-  }, [filtered, filterQuery, value])
+  }, [filtered, filterQuery, value]);
 
   useEffect(() => {
-    if (!open || !dropdownRef.current) return
-    const el = dropdownRef.current.children[highlightIdx] as HTMLElement | undefined
-    el?.scrollIntoView({ block: 'nearest' })
-  }, [highlightIdx, open])
+    if (!open || !dropdownRef.current) return;
+    const el = dropdownRef.current.children[highlightIdx] as
+      | HTMLElement
+      | undefined;
+    el?.scrollIntoView({ block: "nearest" });
+  }, [highlightIdx, open]);
 
   function handleKey(e: React.KeyboardEvent): void {
-    if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
-      e.preventDefault()
-      inputRef.current?.focus()
-      inputRef.current?.select()
-      return
+    if ((e.metaKey || e.ctrlKey) && e.key === "f") {
+      e.preventDefault();
+      inputRef.current?.focus();
+      inputRef.current?.select();
+      return;
     }
-    if (e.key === 'Escape') {
-      setFilterQuery('')
-      setOpen(false)
-      onKeyDown(e)
-      return
+    if (e.key === "Escape") {
+      setFilterQuery("");
+      setOpen(false);
+      onKeyDown(e);
+      return;
     }
     if (!open) {
-      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-        setOpen(true)
-        return
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        setOpen(true);
+        return;
       }
-      onKeyDown(e)
-      return
+      onKeyDown(e);
+      return;
     }
-    if (e.key === 'ArrowDown') {
-      e.preventDefault()
-      setHighlightIdx((i) => Math.min(i + 1, Math.max(0, filtered.length - 1)))
-      return
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setHighlightIdx((i) => Math.min(i + 1, Math.max(0, filtered.length - 1)));
+      return;
     }
-    if (e.key === 'ArrowUp') {
-      e.preventDefault()
-      setHighlightIdx((i) => Math.max(i - 1, 0))
-      return
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setHighlightIdx((i) => Math.max(i - 1, 0));
+      return;
     }
-    if (e.key === 'Enter') {
-      e.preventDefault()
-      let picked: string | null = null
-      if (filtered.length > 0 && filtered[highlightIdx]) picked = filtered[highlightIdx]
+    if (e.key === "Enter") {
+      e.preventDefault();
+      let picked: string | null = null;
+      if (filtered.length > 0 && filtered[highlightIdx])
+        picked = filtered[highlightIdx];
       else {
-        const exact = categories.find((c) => c.toLowerCase() === filterQuery.trim().toLowerCase())
-        if (exact) picked = exact
+        const exact = categories.find(
+          (c) => c.toLowerCase() === filterQuery.trim().toLowerCase(),
+        );
+        if (exact) picked = exact;
       }
       if (picked) {
-        onChange(picked)
-        onCommittedPick?.(picked)
+        onChange(picked);
+        onCommittedPick?.(picked);
       } else {
-        onKeyDown(e)
+        onKeyDown(e);
       }
-      setFilterQuery('')
-      setOpen(false)
-      return
+      setFilterQuery("");
+      setOpen(false);
+      return;
     }
-    onKeyDown(e)
+    onKeyDown(e);
   }
 
-  const placeholder = value?.trim() ? value : 'Search categories…'
+  const placeholder = value?.trim() ? value : "Search categories…";
 
   return (
     <div className="relative min-w-0">
@@ -1636,14 +2744,14 @@ function InlineEditCategoryInput({
         autoFocus
         value={filterQuery}
         onChange={(e) => {
-          setFilterQuery(e.target.value)
-          setOpen(true)
+          setFilterQuery(e.target.value);
+          setOpen(true);
         }}
         onFocus={() => {
-          setOpen(true)
+          setOpen(true);
         }}
         onBlur={() => {
-          window.setTimeout(() => setOpen(false), 150)
+          window.setTimeout(() => setOpen(false), 150);
         }}
         onKeyDown={handleKey}
         placeholder={placeholder}
@@ -1655,20 +2763,22 @@ function InlineEditCategoryInput({
           className="absolute left-0 top-full z-40 mt-1 max-h-[min(280px,42vh)] w-[min(240px,calc(100vw-220px-2rem))] overflow-y-auto rounded-lg border border-zinc-200 bg-white p-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900"
         >
           {filtered.length === 0 ? (
-            <div className="px-2.5 py-2 text-[12px] text-zinc-500 dark:text-zinc-400">No categories match.</div>
+            <div className="px-2.5 py-2 text-[12px] text-zinc-500 dark:text-zinc-400">
+              No categories match.
+            </div>
           ) : (
             filtered.map((cat, i) => (
               <button
                 key={cat}
                 type="button"
                 onMouseDown={(ev) => {
-                  ev.preventDefault()
-                  onChange(cat)
-                  onCommittedPick?.(cat)
-                  setFilterQuery('')
-                  setOpen(false)
+                  ev.preventDefault();
+                  onChange(cat);
+                  onCommittedPick?.(cat);
+                  setFilterQuery("");
+                  setOpen(false);
                 }}
-                className={`flex w-full rounded-md px-2.5 py-1.5 text-left text-[12px] font-medium transition-colors ${i === highlightIdx ? 'bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100' : 'text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-950'}`}
+                className={`flex w-full rounded-md px-2.5 py-1.5 text-left text-[12px] font-medium transition-colors ${i === highlightIdx ? "bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100" : "text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-950"}`}
               >
                 {cat}
               </button>
@@ -1677,111 +2787,162 @@ function InlineEditCategoryInput({
         </div>
       )}
     </div>
-  )
+  );
 }
 
 // ---------------------------------------------------------------------------
 // Add transaction row with category dropdown
 // ---------------------------------------------------------------------------
 
-function AddTransactionRow({ accounts, categories, anchor, onDone }: { accounts: Account[]; categories: string[]; anchor: Date; onDone: (created: boolean) => void }) {
-  const [description, setDescription] = useState('')
-  const [amount, setAmount] = useState('')
-  const [category, setCategory] = useState('')
-  const [accountId, setAccountId] = useState<number | null>(accounts[0]?.id ?? null)
-  const [dateValue, setDateValue] = useState<Date>(anchor)
-  const [showDropdown, setShowDropdown] = useState(false)
-  const [showAccountDropdown, setShowAccountDropdown] = useState(false)
-  const [showDatePicker, setShowDatePicker] = useState(false)
-  const [highlightIdx, setHighlightIdx] = useState(0)
-  const catInputRef = useRef<HTMLInputElement>(null)
-  const dropdownRef = useRef<HTMLDivElement>(null)
-  const accountRef = useRef<HTMLDivElement>(null)
-  const dateRef = useRef<HTMLDivElement>(null)
+function AddTransactionRow({
+  accounts,
+  categories,
+  anchor,
+  onDone,
+}: {
+  accounts: Account[];
+  categories: string[];
+  anchor: Date;
+  onDone: (created: boolean) => void;
+}) {
+  const [description, setDescription] = useState("");
+  const [amount, setAmount] = useState("");
+  const [category, setCategory] = useState("");
+  const [accountId, setAccountId] = useState<number | null>(
+    accounts[0]?.id ?? null,
+  );
+  const [dateValue, setDateValue] = useState<Date>(anchor);
+  const [showDropdown, setShowDropdown] = useState(false);
+  const [showAccountDropdown, setShowAccountDropdown] = useState(false);
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [highlightIdx, setHighlightIdx] = useState(0);
+  const catInputRef = useRef<HTMLInputElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const accountRef = useRef<HTMLDivElement>(null);
+  const dateRef = useRef<HTMLDivElement>(null);
 
   const filteredCategories = useMemo(() => {
-    if (!category.trim()) return categories
-    const lower = category.toLowerCase()
-    return categories.filter((c) => c.toLowerCase().includes(lower))
-  }, [categories, category])
-  const selectedAccount = accounts.find((a) => a.id === accountId) ?? null
-
-  useEffect(() => { setHighlightIdx(0) }, [filteredCategories])
+    if (!category.trim()) return categories;
+    const lower = category.toLowerCase();
+    return categories.filter((c) => c.toLowerCase().includes(lower));
+  }, [categories, category]);
+  const selectedAccount = accounts.find((a) => a.id === accountId) ?? null;
 
   useEffect(() => {
-    if (!accountId && accounts[0]) setAccountId(accounts[0].id)
-  }, [accountId, accounts])
+    setHighlightIdx(0);
+  }, [filteredCategories]);
 
   useEffect(() => {
-    if (!showDropdown || !dropdownRef.current) return
-    const el = dropdownRef.current.children[highlightIdx] as HTMLElement | undefined
-    el?.scrollIntoView({ block: 'nearest' })
-  }, [highlightIdx, showDropdown])
+    if (!accountId && accounts[0]) setAccountId(accounts[0].id);
+  }, [accountId, accounts]);
 
   useEffect(() => {
-    if (!showAccountDropdown) return
+    if (!showDropdown || !dropdownRef.current) return;
+    const el = dropdownRef.current.children[highlightIdx] as
+      | HTMLElement
+      | undefined;
+    el?.scrollIntoView({ block: "nearest" });
+  }, [highlightIdx, showDropdown]);
+
+  useEffect(() => {
+    if (!showAccountDropdown) return;
     const close = (e: MouseEvent) => {
-      if (accountRef.current && !accountRef.current.contains(e.target as Node)) setShowAccountDropdown(false)
-    }
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setShowAccountDropdown(false) }
-    document.addEventListener('pointerdown', close)
-    document.addEventListener('keydown', onKey)
+      if (accountRef.current && !accountRef.current.contains(e.target as Node))
+        setShowAccountDropdown(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setShowAccountDropdown(false);
+    };
+    document.addEventListener("pointerdown", close);
+    document.addEventListener("keydown", onKey);
     return () => {
-      document.removeEventListener('pointerdown', close)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [showAccountDropdown])
+      document.removeEventListener("pointerdown", close);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [showAccountDropdown]);
 
   useEffect(() => {
-    if (!showDatePicker) return
+    if (!showDatePicker) return;
     const close = (e: MouseEvent) => {
-      if (dateRef.current && !dateRef.current.contains(e.target as Node)) setShowDatePicker(false)
-    }
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setShowDatePicker(false) }
-    document.addEventListener('pointerdown', close)
-    document.addEventListener('keydown', onKey)
+      if (dateRef.current && !dateRef.current.contains(e.target as Node))
+        setShowDatePicker(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setShowDatePicker(false);
+    };
+    document.addEventListener("pointerdown", close);
+    document.addEventListener("keydown", onKey);
     return () => {
-      document.removeEventListener('pointerdown', close)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [showDatePicker])
+      document.removeEventListener("pointerdown", close);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [showDatePicker]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onDone(false)
-    }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [onDone])
+      if (e.key === "Escape") onDone(false);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onDone]);
 
   async function create(): Promise<void> {
-    if (!description.trim() && !amount.trim()) { onDone(false); return }
+    if (!description.trim() && !amount.trim()) {
+      onDone(false);
+      return;
+    }
     await window.api.createTransaction({
-      date: Math.floor(new Date(dateValue.getFullYear(), dateValue.getMonth(), dateValue.getDate(), 12, 0, 0, 0).getTime() / 1000),
+      date: Math.floor(
+        new Date(
+          dateValue.getFullYear(),
+          dateValue.getMonth(),
+          dateValue.getDate(),
+          12,
+          0,
+          0,
+          0,
+        ).getTime() / 1000,
+      ),
       description,
       amount: parseCurrencyInput(amount),
-      mapped_category: category || 'Uncategorized',
-      raw_category: category || 'Uncategorized',
+      mapped_category: category || "Uncategorized",
+      raw_category: category || "Uncategorized",
       account_id: accountId,
-      source: 'manual'
-    })
-    onDone(true)
+      source: "manual",
+    });
+    onDone(true);
   }
 
   function handleEsc(): void {
-    onDone(false)
+    onDone(false);
   }
 
   function handleCatKeyDown(e: React.KeyboardEvent): void {
-    if (e.key === 'Escape') { setShowDropdown(false); handleEsc(); return }
-    if (!showDropdown) { if (e.key === 'ArrowDown' || e.key === 'ArrowUp') setShowDropdown(true); return }
-    if (e.key === 'ArrowDown') { e.preventDefault(); setHighlightIdx((i) => Math.min(i + 1, filteredCategories.length - 1)); return }
-    if (e.key === 'ArrowUp') { e.preventDefault(); setHighlightIdx((i) => Math.max(i - 1, 0)); return }
-    if (e.key === 'Enter') {
-      e.preventDefault()
-      if (filteredCategories[highlightIdx]) setCategory(filteredCategories[highlightIdx])
-      setShowDropdown(false)
-      return
+    if (e.key === "Escape") {
+      setShowDropdown(false);
+      handleEsc();
+      return;
+    }
+    if (!showDropdown) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") setShowDropdown(true);
+      return;
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setHighlightIdx((i) => Math.min(i + 1, filteredCategories.length - 1));
+      return;
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setHighlightIdx((i) => Math.max(i - 1, 0));
+      return;
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (filteredCategories[highlightIdx])
+        setCategory(filteredCategories[highlightIdx]);
+      setShowDropdown(false);
+      return;
     }
   }
 
@@ -1793,39 +2954,61 @@ function AddTransactionRow({ accounts, categories, anchor, onDone }: { accounts:
           onClick={() => setShowDatePicker((v) => !v)}
           className="truncate text-left text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100"
         >
-          {format(dateValue, 'MMM d')}
+          {format(dateValue, "MMM d")}
         </button>
         {showDatePicker ? (
           <MonthDayPicker
             anchor={anchor}
             selected={dateValue}
             onSelect={(next) => {
-              setDateValue(next)
-              setShowDatePicker(false)
+              setDateValue(next);
+              setShowDatePicker(false);
             }}
           />
         ) : null}
       </div>
-      <input autoFocus value={description} onChange={(e) => setDescription(e.target.value)} onKeyDown={(e) => { if (e.key === 'Escape') handleEsc(); if (e.key === 'Enter') catInputRef.current?.focus() }} placeholder="Description" className="bg-transparent outline-none" />
+      <input
+        autoFocus
+        value={description}
+        onChange={(e) => setDescription(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") handleEsc();
+          if (e.key === "Enter") catInputRef.current?.focus();
+        }}
+        placeholder="Description"
+        className="bg-transparent outline-none"
+      />
       <div className="relative">
         <input
           ref={catInputRef}
           value={category}
-          onChange={(e) => { setCategory(e.target.value); setShowDropdown(true) }}
+          onChange={(e) => {
+            setCategory(e.target.value);
+            setShowDropdown(true);
+          }}
           onFocus={() => setShowDropdown(true)}
-          onBlur={() => { window.setTimeout(() => setShowDropdown(false), 150) }}
+          onBlur={() => {
+            window.setTimeout(() => setShowDropdown(false), 150);
+          }}
           onKeyDown={handleCatKeyDown}
           placeholder="Category"
           className="w-full bg-transparent outline-none"
         />
         {showDropdown && filteredCategories.length > 0 && (
-          <div ref={dropdownRef} className="absolute left-0 top-full z-40 mt-1 max-h-[180px] w-[200px] overflow-y-auto rounded-lg border border-zinc-200 bg-white p-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
+          <div
+            ref={dropdownRef}
+            className="absolute left-0 top-full z-40 mt-1 max-h-[180px] w-[200px] overflow-y-auto rounded-lg border border-zinc-200 bg-white p-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900"
+          >
             {filteredCategories.map((cat, i) => (
               <button
                 key={cat}
                 type="button"
-                onMouseDown={(e) => { e.preventDefault(); setCategory(cat); setShowDropdown(false) }}
-                className={`flex w-full rounded-md px-2.5 py-1.5 text-left text-[12px] font-medium transition-colors ${i === highlightIdx ? 'bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100' : 'text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-950'}`}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  setCategory(cat);
+                  setShowDropdown(false);
+                }}
+                className={`flex w-full rounded-md px-2.5 py-1.5 text-left text-[12px] font-medium transition-colors ${i === highlightIdx ? "bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100" : "text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-950"}`}
               >
                 {cat}
               </button>
@@ -1840,7 +3023,7 @@ function AddTransactionRow({ accounts, categories, anchor, onDone }: { accounts:
           className="w-full truncate rounded px-1 text-left text-[11px]"
           style={selectedAccount ? { color: selectedAccount.color } : undefined}
         >
-          {selectedAccount?.name || 'Select'}
+          {selectedAccount?.name || "Select"}
         </button>
         {showAccountDropdown ? (
           <div className="absolute left-0 top-full z-40 mt-1 min-w-[140px] overflow-hidden rounded-lg border border-zinc-200 bg-white p-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
@@ -1849,58 +3032,202 @@ function AddTransactionRow({ accounts, categories, anchor, onDone }: { accounts:
                 key={account.id}
                 type="button"
                 onMouseDown={(e) => {
-                  e.preventDefault()
-                  setAccountId(account.id)
-                  setShowAccountDropdown(false)
+                  e.preventDefault();
+                  setAccountId(account.id);
+                  setShowAccountDropdown(false);
                 }}
                 className={`flex w-full items-center gap-1.5 rounded-md px-2.5 py-1.5 text-left text-[11px] font-medium transition-colors ${
                   account.id === accountId
-                    ? 'bg-zinc-100 dark:bg-zinc-800'
-                    : 'hover:bg-zinc-50 dark:hover:bg-zinc-950'
+                    ? "bg-zinc-100 dark:bg-zinc-800"
+                    : "hover:bg-zinc-50 dark:hover:bg-zinc-950"
                 }`}
                 style={{ color: account.color }}
               >
-                <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: account.color }} />
+                <span
+                  className="h-2 w-2 shrink-0 rounded-full"
+                  style={{ backgroundColor: account.color }}
+                />
                 <span className="truncate">{account.name}</span>
               </button>
             ))}
           </div>
         ) : null}
       </div>
-      <input value={amount} onChange={(e) => setAmount(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void create(); if (e.key === 'Escape') handleEsc() }} placeholder="$0.00" className="bg-transparent text-right outline-none" />
-      <button type="button" onClick={() => void create()} className="inline-flex h-6 w-6 items-center justify-center rounded-full text-emerald-600 transition-colors hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-950/30" aria-label="Confirm"><CheckIcon /></button>
+      <input
+        value={amount}
+        onChange={(e) => setAmount(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") void create();
+          if (e.key === "Escape") handleEsc();
+        }}
+        placeholder="$0.00"
+        className="bg-transparent text-right outline-none"
+      />
+      <button
+        type="button"
+        onClick={() => void create()}
+        className="inline-flex h-6 w-6 items-center justify-center rounded-full text-emerald-600 transition-colors hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-950/30"
+        aria-label="Confirm"
+      >
+        <CheckIcon />
+      </button>
     </div>
-  )
+  );
 }
 
 // ---------------------------------------------------------------------------
 // Icons
 // ---------------------------------------------------------------------------
 
-function ChevronIcon({ direction }: { direction: 'up' | 'down' }) {
-  return (<svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={direction === 'down' ? 'M5 7.5 L10 12.5 L15 7.5' : 'M5 12.5 L10 7.5 L15 12.5'} /></svg>)
+function ChevronIcon({ direction }: { direction: "up" | "down" }) {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path
+        d={
+          direction === "down"
+            ? "M5 7.5 L10 12.5 L15 7.5"
+            : "M5 12.5 L10 7.5 L15 12.5"
+        }
+      />
+    </svg>
+  );
 }
 function CalendarIcon() {
-  return (<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="11" rx="2" /><path d="M2 7h12M5 1v3M11 1v3" /></svg>)
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="2" y="3" width="12" height="11" rx="2" />
+      <path d="M2 7h12M5 1v3M11 1v3" />
+    </svg>
+  );
 }
 function CollapseChevron({ collapsed }: { collapsed: boolean }) {
-  return (<svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={collapsed ? 'M5 7.5 L10 12.5 L15 7.5' : 'M5 12.5 L10 7.5 L15 12.5'} /></svg>)
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path
+        d={collapsed ? "M5 7.5 L10 12.5 L15 7.5" : "M5 12.5 L10 7.5 L15 12.5"}
+      />
+    </svg>
+  );
 }
 function CsvFileIcon({ label }: { label: string }) {
-  return (<span className="relative inline-flex h-12 w-10 shrink-0 items-end justify-center rounded-md border border-zinc-200 bg-white pb-1 text-[8px] font-semibold text-emerald-700 shadow-sm dark:border-zinc-700 dark:bg-zinc-950 dark:text-emerald-300"><span className="absolute right-0 top-0 h-3 w-3 rounded-bl border-b border-l border-zinc-200 bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800" />{label.slice(0, 4)}</span>)
+  return (
+    <span className="relative inline-flex h-12 w-10 shrink-0 items-end justify-center rounded-md border border-zinc-200 bg-white pb-1 text-[8px] font-semibold text-emerald-700 shadow-sm dark:border-zinc-700 dark:bg-zinc-950 dark:text-emerald-300">
+      <span className="absolute right-0 top-0 h-3 w-3 rounded-bl border-b border-l border-zinc-200 bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800" />
+      {label.slice(0, 4)}
+    </span>
+  );
 }
 function PencilIcon() {
-  return (<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9.8 3.1 12.9 6.2M2.8 10.1 10.7 2.2a1.5 1.5 0 0 1 2.1 0l1 1a1.5 1.5 0 0 1 0 2.1L5.9 13.2l-3.6.6.5-3.7Z" /></svg>)
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M9.8 3.1 12.9 6.2M2.8 10.1 10.7 2.2a1.5 1.5 0 0 1 2.1 0l1 1a1.5 1.5 0 0 1 0 2.1L5.9 13.2l-3.6.6.5-3.7Z" />
+    </svg>
+  );
 }
 function CheckIcon() {
-  return (<svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m3 7.3 2.6 2.6L11 4.1" /></svg>)
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="m3 7.3 2.6 2.6L11 4.1" />
+    </svg>
+  );
 }
 function UndoIcon() {
-  return (<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 7h7a3 3 0 0 1 0 6H8" /><path d="M5 5 3 7l2 2" /></svg>)
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M3 7h7a3 3 0 0 1 0 6H8" />
+      <path d="M5 5 3 7l2 2" />
+    </svg>
+  );
 }
 function PlusIcon() {
-  return (<svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true"><path d="M6 1v10M1 6h10" /></svg>)
+  return (
+    <svg
+      width="10"
+      height="10"
+      viewBox="0 0 12 12"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      aria-hidden="true"
+    >
+      <path d="M6 1v10M1 6h10" />
+    </svg>
+  );
 }
 function XIcon() {
-  return (<svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true"><path d="m3 3 6 6M9 3 3 9" /></svg>)
+  return (
+    <svg
+      width="10"
+      height="10"
+      viewBox="0 0 12 12"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      aria-hidden="true"
+    >
+      <path d="m3 3 6 6M9 3 3 9" />
+    </svg>
+  );
 }
