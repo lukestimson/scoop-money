@@ -12,6 +12,7 @@
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "test:agent-bridge": "node --experimental-strip-types --test src/main/agentBridgeCore.test.ts",
+    "test:ai-models": "node --experimental-strip-types --test src/main/aiModelCatalog.test.ts",
     "test:importer": "TZ=America/Los_Angeles node --experimental-strip-types --test src/main/importerCore.test.ts",
     "agent:rpc": "node scripts/scoop_money_agent_rpc.mjs",
     "agent:status": "node scripts/scoop_money_agent_rpc.mjs agent.status",

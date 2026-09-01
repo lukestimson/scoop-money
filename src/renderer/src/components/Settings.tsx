@@ -529,6 +529,7 @@ function FolderIcon() {
 function AiModelSection() {
   const [state, setState] = useState<AiProviderState | null>(null)
   const [loadingProvider, setLoadingProvider] = useState<AiProvider | null>(null)
+  const [refreshing, setRefreshing] = useState(false)
   const [modelsOpen, setModelsOpen] = useState(false)
   const [error, setError] = useState('')
 
@@ -551,6 +552,7 @@ function AiModelSection() {
     try {
       const next = await window.api.setAiProvider(provider)
       setState(next)
+      window.dispatchEvent(new Event('scoop-money:ai-model-changed'))
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -567,6 +569,20 @@ function AiModelSection() {
       return
     }
     setState({ ...state, model: id })
+    window.dispatchEvent(new Event('scoop-money:ai-model-changed'))
+  }
+
+  async function refreshModels(): Promise<void> {
+    setRefreshing(true)
+    setError('')
+    try {
+      setState(await window.api.refreshAiModels())
+      window.dispatchEvent(new Event('scoop-money:ai-model-changed'))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setRefreshing(false)
+    }
   }
 
   const provider = state?.provider ?? 'anthropic'
@@ -603,7 +619,18 @@ function AiModelSection() {
           {configured ? 'API key detected' : provider === 'anthropic' ? 'ANTHROPIC_API_KEY needed' : 'OPENAI_API_KEY needed'}
         </div>
       </div>
-      <div className="mb-2 text-sm text-zinc-600 dark:text-zinc-300">Default model: {state?.models.find((model) => model.id === state.model)?.display_name ?? state?.model ?? 'Not loaded'}</div>
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <div className="text-sm text-zinc-600 dark:text-zinc-300">Default model: {state?.models.find((model) => model.id === state.model)?.display_name ?? state?.model ?? 'Not loaded'}</div>
+        <button
+          type="button"
+          onClick={() => void refreshModels()}
+          disabled={!configured || refreshing}
+          title={configured ? 'Refresh models available to this API account' : 'Add this provider’s API key to refresh models'}
+          className="rounded-full border border-zinc-200 px-2.5 py-1 text-[11px] font-medium text-zinc-600 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+        >
+          {refreshing ? 'Refreshing…' : 'Refresh'}
+        </button>
+      </div>
       {error ? <div className="mb-2 text-[12px] text-red-600 dark:text-red-400">{error}</div> : null}
       <button
         type="button"

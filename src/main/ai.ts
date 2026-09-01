@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, readFileSync, renameSync, writeFileSync } from 'fs'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { join } from 'path'
@@ -9,6 +9,16 @@ import type { ChatCompletionContentPart, ChatCompletionMessageParam, ChatComplet
 import type { AiPromptSettings, AiProvider, AiProviderState, ChatAttachment, ChatMessage, ChatResult, ModelInfo, SetModelIdResult } from '../types/money'
 import { parseLocalDateToUnix } from '../types/dateParsing'
 import { accumulateAnthropicUsage, accumulateOpenAiUsage, createUsageAccumulator, toUsageSummary } from './aiUsageCost'
+import {
+  DEFAULT_MODELS,
+  DEFAULT_PROVIDER,
+  FALLBACK_MODELS,
+  includeSelectedModel,
+  isAiProvider,
+  modelsFromAnthropicResponse,
+  modelsFromOpenAiResponse,
+  normalizeCachedModels
+} from './aiModelCatalog'
 import {
   createBudgetLineItem,
   createIncomeEntry,
@@ -29,31 +39,6 @@ import {
 
 dotenv.config()
 
-const DEFAULT_PROVIDER: AiProvider = 'anthropic'
-const DEFAULT_MODELS: Record<AiProvider, string> = {
-  anthropic: 'claude-sonnet-4-20250514',
-  openai: 'gpt-5.2'
-}
-const FALLBACK_MODELS: Record<AiProvider, ModelInfo[]> = {
-  anthropic: [
-    { id: 'claude-sonnet-4-20250514', display_name: 'Claude Sonnet 4', provider: 'anthropic' },
-    { id: 'claude-opus-4-1-20250805', display_name: 'Claude Opus 4.1', provider: 'anthropic' },
-    { id: 'claude-opus-4-20250514', display_name: 'Claude Opus 4', provider: 'anthropic' },
-    { id: 'claude-3-7-sonnet-20250219', display_name: 'Claude Sonnet 3.7', provider: 'anthropic' },
-    { id: 'claude-3-5-sonnet-20241022', display_name: 'Claude Sonnet 3.5', provider: 'anthropic' },
-    { id: 'claude-3-5-haiku-20241022', display_name: 'Claude Haiku 3.5', provider: 'anthropic' },
-    { id: 'claude-3-haiku-20240307', display_name: 'Claude Haiku 3', provider: 'anthropic' }
-  ],
-  openai: [
-    { id: 'gpt-5.2', display_name: 'GPT-5.2', provider: 'openai' },
-    { id: 'gpt-5.2-pro', display_name: 'GPT-5.2 pro', provider: 'openai' },
-    { id: 'gpt-5.1', display_name: 'GPT-5.1', provider: 'openai' },
-    { id: 'gpt-5', display_name: 'GPT-5', provider: 'openai' },
-    { id: 'gpt-5-mini', display_name: 'GPT-5 mini', provider: 'openai' },
-    { id: 'gpt-5-nano', display_name: 'GPT-5 nano', provider: 'openai' },
-    { id: 'gpt-4.1', display_name: 'GPT-4.1', provider: 'openai' }
-  ]
-}
 const MAX_TOOL_ROUNDS = 12
 const execFileAsync = promisify(execFile)
 const AI_PROMPT_META_PREFIX = 'ai_prompt.'
@@ -75,18 +60,34 @@ let modelPath = ''
 const cachedModels: Partial<Record<AiProvider, ModelInfo[]>> = {}
 const modelsLoadPromise: Partial<Record<AiProvider, Promise<ModelInfo[]>>> = {}
 
+type StoredModelPreference = {
+  provider?: unknown
+  model?: unknown
+  models?: unknown
+  modelCache?: unknown
+}
+
 export function initAiPersistence(userDataPath: string): void {
   modelPath = join(userDataPath, 'model.json')
   if (existsSync(modelPath)) {
     try {
-      const parsed = JSON.parse(readFileSync(modelPath, 'utf8')) as {
-        provider?: AiProvider
-        model?: string
-        models?: Partial<Record<AiProvider, string>>
+      const parsed = JSON.parse(readFileSync(modelPath, 'utf8')) as StoredModelPreference
+      if (isAiProvider(parsed.provider)) currentProvider = parsed.provider
+      if (parsed.models && typeof parsed.models === 'object') {
+        for (const provider of ['anthropic', 'openai'] as const) {
+          const model = (parsed.models as Record<string, unknown>)[provider]
+          if (typeof model === 'string' && model.trim()) currentModels[provider] = model.trim()
+        }
       }
-      if (parsed.provider === 'anthropic' || parsed.provider === 'openai') currentProvider = parsed.provider
-      if (parsed.models) currentModels = { ...currentModels, ...parsed.models }
-      if (parsed.model && !parsed.models?.anthropic) currentModels.anthropic = parsed.model
+      if (typeof parsed.model === 'string' && parsed.model.trim() && currentModels.anthropic === DEFAULT_MODELS.anthropic) {
+        currentModels.anthropic = parsed.model.trim()
+      }
+      if (parsed.modelCache && typeof parsed.modelCache === 'object') {
+        for (const provider of ['anthropic', 'openai'] as const) {
+          const models = normalizeCachedModels(provider, (parsed.modelCache as Record<string, unknown>)[provider])
+          if (models.length > 0) cachedModels[provider] = includeSelectedModel(provider, currentModels[provider], models)
+        }
+      }
     } catch {
       currentProvider = DEFAULT_PROVIDER
       currentModels = { ...DEFAULT_MODELS }
@@ -104,6 +105,16 @@ export async function getAvailableModels(): Promise<ModelInfo[]> {
 
 export async function getAiProviderState(): Promise<AiProviderState> {
   const models = await getAvailableModelsForProvider(currentProvider)
+  return {
+    provider: currentProvider,
+    model: currentModels[currentProvider],
+    models,
+    configured: hasConfiguredApiKey(currentProvider)
+  }
+}
+
+export async function refreshAiModels(): Promise<AiProviderState> {
+  const models = await getAvailableModelsForProvider(currentProvider, { force: true })
   return {
     provider: currentProvider,
     model: currentModels[currentProvider],
@@ -132,25 +143,36 @@ export async function setModelId(id: string): Promise<SetModelIdResult> {
   return { success: true }
 }
 
-async function getAvailableModelsForProvider(provider: AiProvider): Promise<ModelInfo[]> {
-  if (cachedModels[provider]) return cachedModels[provider]
+async function getAvailableModelsForProvider(provider: AiProvider, options: { force?: boolean } = {}): Promise<ModelInfo[]> {
+  if (!options.force && cachedModels[provider]) return cachedModels[provider] as ModelInfo[]
   if (modelsLoadPromise[provider]) return modelsLoadPromise[provider]
   if (!hasConfiguredApiKey(provider)) {
-    cachedModels[provider] = ensureCurrentModelInList(provider, FALLBACK_MODELS[provider])
-    return cachedModels[provider]
+    cachedModels[provider] = includeSelectedModel(provider, currentModels[provider], cachedModels[provider] ?? FALLBACK_MODELS[provider])
+    persistModel()
+    return cachedModels[provider] as ModelInfo[]
   }
 
   modelsLoadPromise[provider] = loadProviderModels(provider)
     .then((models) => {
-      cachedModels[provider] = ensureCurrentModelInList(provider, models.length > 0 ? models : FALLBACK_MODELS[provider])
-      if (!cachedModels[provider]?.some((model) => model.id === currentModels[provider]) && cachedModels[provider]?.[0]) {
-        currentModels[provider] = cachedModels[provider][0].id
+      if (models.length === 0) {
+        cachedModels[provider] = includeSelectedModel(provider, currentModels[provider], cachedModels[provider] ?? FALLBACK_MODELS[provider])
         persistModel()
+        return cachedModels[provider] ?? []
       }
-      return cachedModels[provider] ?? []
+      cachedModels[provider] = models
+      if (!models.some((model) => model.id === currentModels[provider]) && models[0]) {
+        currentModels[provider] = cachedModels[provider][0].id
+      }
+      persistModel()
+      return models
     })
-    .catch(() => {
-      cachedModels[provider] = ensureCurrentModelInList(provider, FALLBACK_MODELS[provider])
+    .catch((error: unknown) => {
+      cachedModels[provider] = includeSelectedModel(provider, currentModels[provider], cachedModels[provider] ?? FALLBACK_MODELS[provider])
+      persistModel()
+      if (options.force) {
+        const message = error instanceof Error ? error.message : String(error)
+        throw new Error(`Could not refresh ${provider === 'anthropic' ? 'Anthropic' : 'OpenAI'} models: ${message}`)
+      }
       return cachedModels[provider] ?? []
     })
     .finally(() => {
@@ -161,24 +183,18 @@ async function getAvailableModelsForProvider(provider: AiProvider): Promise<Mode
 
 async function loadProviderModels(provider: AiProvider): Promise<ModelInfo[]> {
   if (provider === 'anthropic') {
-    const page = await getAnthropicClient().models.list({ limit: 100 })
-    const remoteNames = new Map(page.data.map((model) => [model.id, model.display_name]))
-    return FALLBACK_MODELS.anthropic.map((model) => ({
-      ...model,
-      display_name: remoteNames.get(model.id) ?? model.display_name
-    }))
+    const models: Array<{ id: string; display_name?: string | null }> = []
+    let afterId: string | undefined
+    do {
+      const page = await getAnthropicClient().models.list({ limit: 1000, ...(afterId ? { after_id: afterId } : {}) })
+      models.push(...page.data)
+      afterId = page.has_more ? page.last_id ?? undefined : undefined
+    } while (afterId)
+    return modelsFromAnthropicResponse(models)
   }
 
   const page = await getOpenAiClient().models.list()
-  const remoteIds = new Set(page.data.map((model) => model.id))
-  return FALLBACK_MODELS.openai.filter((model) => remoteIds.has(model.id) || !hasConfiguredApiKey('openai'))
-}
-
-function ensureCurrentModelInList(provider: AiProvider, models: ModelInfo[]): ModelInfo[] {
-  const current = currentModels[provider]
-  if (models.some((model) => model.id === current)) return models
-  currentModels[provider] = models[0]?.id ?? DEFAULT_MODELS[provider]
-  return models
+  return modelsFromOpenAiResponse(page.data)
 }
 
 export function getAiPromptSettings(): AiPromptSettings {
@@ -380,7 +396,20 @@ function tryLoadDotEnv(): void {
 
 function persistModel(): void {
   if (!modelPath) return
-  writeFileSync(modelPath, JSON.stringify({ provider: currentProvider, model: currentModels[currentProvider], models: currentModels }, null, 2))
+  const serialized = JSON.stringify(
+    {
+      version: 2,
+      provider: currentProvider,
+      model: currentModels[currentProvider],
+      models: currentModels,
+      modelCache: cachedModels
+    },
+    null,
+    2
+  )
+  const temporaryPath = `${modelPath}.tmp`
+  writeFileSync(temporaryPath, serialized)
+  renameSync(temporaryPath, modelPath)
 }
 
 function chatMessagesToTurns(history: ChatMessage[]): Anthropic.MessageParam[] {

@@ -66,6 +66,7 @@ import {
   getAiProviderState,
   getModelId,
   initAiPersistence,
+  refreshAiModels,
   resetAiPromptSettings,
   setAiProvider,
   setModelId,
@@ -254,6 +255,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle('ai:setModel', (_event, id: string) => setModelId(id))
   ipcMain.handle('ai:getProvider', () => getAiProviderState())
   ipcMain.handle('ai:setProvider', (_event, provider: AiProvider) => setAiProvider(provider))
+  ipcMain.handle('ai:refreshModels', () => refreshAiModels())
   ipcMain.handle('ai:startMacDictation', () => startMacDictation())
   ipcMain.handle('aiPrompts:get', () => getAiPromptSettings())
   ipcMain.handle('aiPrompts:update', (_event, data) => updateAiPromptSettings(data))

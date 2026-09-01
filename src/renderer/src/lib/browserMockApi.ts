@@ -245,67 +245,39 @@ let aiPromptSettings: AiPromptSettings = {
 
 let aiProvider: AiProvider = 'anthropic'
 let aiModels = {
-  anthropic: 'claude-sonnet-4-20250514',
-  openai: 'gpt-5.2'
+  anthropic: 'claude-sonnet-5',
+  openai: 'gpt-5.6-terra'
 }
 const previewModels = {
   anthropic: [
     {
-      id: 'claude-sonnet-4-20250514',
-      display_name: 'Claude Sonnet 4',
+      id: 'claude-sonnet-5',
+      display_name: 'Claude Sonnet 5',
       provider: 'anthropic' as const
     },
     {
-      id: 'claude-opus-4-1-20250805',
-      display_name: 'Claude Opus 4.1',
+      id: 'claude-opus-5',
+      display_name: 'Claude Opus 5',
       provider: 'anthropic' as const
     },
     {
-      id: 'claude-opus-4-20250514',
-      display_name: 'Claude Opus 4',
-      provider: 'anthropic' as const
-    },
-    {
-      id: 'claude-3-7-sonnet-20250219',
-      display_name: 'Claude Sonnet 3.7',
-      provider: 'anthropic' as const
-    },
-    {
-      id: 'claude-3-5-sonnet-20241022',
-      display_name: 'Claude Sonnet 3.5',
-      provider: 'anthropic' as const
-    },
-    {
-      id: 'claude-3-5-haiku-20241022',
-      display_name: 'Claude Haiku 3.5',
-      provider: 'anthropic' as const
-    },
-    {
-      id: 'claude-3-haiku-20240307',
-      display_name: 'Claude Haiku 3',
+      id: 'claude-fable-5',
+      display_name: 'Claude Fable 5',
       provider: 'anthropic' as const
     }
   ],
   openai: [
-    { id: 'gpt-5.2', display_name: 'GPT-5.2', provider: 'openai' as const },
+    { id: 'gpt-5.6-sol', display_name: 'GPT-5.6 Sol', provider: 'openai' as const },
     {
-      id: 'gpt-5.2-pro',
-      display_name: 'GPT-5.2 pro',
-      provider: 'openai' as const
-    },
-    { id: 'gpt-5.1', display_name: 'GPT-5.1', provider: 'openai' as const },
-    { id: 'gpt-5', display_name: 'GPT-5', provider: 'openai' as const },
-    {
-      id: 'gpt-5-mini',
-      display_name: 'GPT-5 mini',
+      id: 'gpt-5.6-terra',
+      display_name: 'GPT-5.6 Terra',
       provider: 'openai' as const
     },
     {
-      id: 'gpt-5-nano',
-      display_name: 'GPT-5 nano',
+      id: 'gpt-5.6-luna',
+      display_name: 'GPT-5.6 Luna',
       provider: 'openai' as const
-    },
-    { id: 'gpt-4.1', display_name: 'GPT-4.1', provider: 'openai' as const }
+    }
   ]
 }
 
@@ -796,6 +768,12 @@ export function installBrowserMockApi(): void {
         configured: false
       }
     },
+    refreshAiModels: async () => ({
+      provider: aiProvider,
+      model: aiModels[aiProvider],
+      models: copy(previewModels[aiProvider]),
+      configured: false
+    }),
     startMacDictation: async () => undefined,
     getAiPromptSettings: async () => copy(aiPromptSettings),
     updateAiPromptSettings: async (data) => {

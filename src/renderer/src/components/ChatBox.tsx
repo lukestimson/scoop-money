@@ -94,7 +94,7 @@ export function ChatBox({
     prevMessageLength.current = chat.messages.length
   }, [chat.messages.length, isExpanded])
 
-  useEffect(() => {
+  const loadAiProviderState = useCallback((): (() => void) => {
     let cancelled = false
     window.api.getAiProvider()
       .then((state) => {
@@ -108,6 +108,15 @@ export function ChatBox({
       cancelled = true
     }
   }, [])
+
+  useEffect(() => {
+    const stopLoading = loadAiProviderState()
+    window.addEventListener('scoop-money:ai-model-changed', loadAiProviderState)
+    return () => {
+      stopLoading()
+      window.removeEventListener('scoop-money:ai-model-changed', loadAiProviderState)
+    }
+  }, [loadAiProviderState])
 
   useEffect(() => {
     if (!attachOpen) return

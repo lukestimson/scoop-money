@@ -88,6 +88,7 @@ const api: MoneyAPI = {
   setModel: (id) => ipcRenderer.invoke('ai:setModel', id),
   getAiProvider: () => ipcRenderer.invoke('ai:getProvider'),
   setAiProvider: (provider: AiProvider) => ipcRenderer.invoke('ai:setProvider', provider),
+  refreshAiModels: () => ipcRenderer.invoke('ai:refreshModels'),
   startMacDictation: () => ipcRenderer.invoke('ai:startMacDictation'),
   getAiPromptSettings: () => ipcRenderer.invoke('aiPrompts:get'),
   updateAiPromptSettings: (data) => ipcRenderer.invoke('aiPrompts:update', data),

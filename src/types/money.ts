@@ -377,6 +377,7 @@ export interface MoneyAPI {
   setModel(id: string): Promise<SetModelIdResult>
   getAiProvider(): Promise<AiProviderState>
   setAiProvider(provider: AiProvider): Promise<AiProviderState>
+  refreshAiModels(): Promise<AiProviderState>
   startMacDictation(): Promise<void>
   getAiPromptSettings(): Promise<AiPromptSettings>
   updateAiPromptSettings(data: Partial<AiPromptSettings>): Promise<AiPromptSettings>
